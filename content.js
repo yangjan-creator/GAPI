@@ -344,6 +344,10 @@
     
     // 2. 清理內存中的圖片 URL 集合
     processedImageUrls.clear();
+
+    // 2-1. 清理生圖自動觸發狀態
+    autoImageHandledMessages.clear();
+    lastAutoImageClickAt = 0;
     
     // 3. 強制刷新待寫入的 Storage（確保數據不丟失）
     flushStorageWrites();
@@ -644,6 +648,9 @@
   let imageObserver = null; // 監控圖片變化的 MutationObserver（新增）
   let lastMessageCount = 0; // 記錄上次檢測到的消息數量
   let recordedMessages = new Set(); // 已記錄的消息 ID 集合（用於去重）
+  let autoImageHandledMessages = new Set(); // 已處理的生圖消息（避免重複觸發）
+  let lastAutoImageClickAt = 0;
+  const AUTO_IMAGE_CLICK_COOLDOWN = 4000;
   let lastModelResponseCount = 0; // 記錄上次檢測到的模型回復數量
   let lastImageCount = 0; // 記錄上次檢測到的圖片數量（新增）
   let scrapeTimeout = null; // 延遲提取的定時器
