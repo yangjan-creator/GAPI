@@ -1,0 +1,1813 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemini 對話分類助手</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: #f8fafc;
+      color: #1e293b;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 100%;
+      padding: 1rem;
+    }
+
+    /* Header */
+    .header {
+      margin-bottom: 1.5rem;
+    }
+
+    .header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #1e293b;
+      margin-bottom: 0.5rem;
+    }
+
+    /* Profile Selector */
+    .profile-selector-section {
+      background: white;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      border: 1px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .profile-selector-label {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: #64748b;
+      white-space: nowrap;
+    }
+
+    .profile-selector {
+      flex: 1;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+      color: #1e293b;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .profile-selector:hover {
+      border-color: #cbd5e1;
+      background: #f1f5f9;
+    }
+
+    .profile-selector:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    /* Actions Section */
+    .actions-section {
+      background: white;
+      border-radius: 0.5rem;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      border: 1px solid #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .btn-new-chat {
+      width: 100%;
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 0.375rem;
+      padding: 0.625rem 1rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-new-chat:hover {
+      background: #2563eb;
+    }
+
+    .btn-new-chat:active {
+      background: #1d4ed8;
+    }
+
+    .btn-pause-monitoring {
+      width: 100%;
+      background: #ef4444;
+      color: white;
+      border: none;
+      border-radius: 0.375rem;
+      padding: 0.625rem 1rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-pause-monitoring:hover {
+      background: #dc2626;
+    }
+
+    .btn-pause-monitoring:active {
+      background: #b91c1c;
+    }
+
+    .btn-pause-monitoring.paused {
+      background: #10b981;
+    }
+
+    .btn-pause-monitoring.paused:hover {
+      background: #059669;
+    }
+
+    .btn-pause-monitoring.paused:active {
+      background: #047857;
+    }
+
+    .btn-add-category {
+      flex: 1;
+      background: #f1f5f9;
+      color: #475569;
+      border: none;
+      border-radius: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-add-category:hover {
+      background: #e2e8f0;
+    }
+
+    .btn-add-category:active {
+      background: #cbd5e1;
+    }
+
+    .btn-auto-suggest {
+      flex: 1;
+      background: #f1f5f9;
+      color: #475569;
+      border: none;
+      border-radius: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-auto-suggest:hover {
+      background: #e2e8f0;
+    }
+
+    .btn-auto-suggest:active {
+      background: #cbd5e1;
+    }
+
+    .btn-auto-suggest:disabled {
+      background: #cbd5e1;
+      cursor: not-allowed;
+    }
+
+    /* Non-Gemini Page Message */
+    .non-gemini-message {
+      text-align: center;
+      padding: 3rem 1.5rem;
+      background: #fee2e2;
+      border-radius: 0.5rem;
+      margin-bottom: 1rem;
+      border: 1px solid #fca5a5;
+    }
+
+    .non-gemini-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }
+
+    .non-gemini-title {
+      font-size: 1.125rem;
+      font-weight: 600;
+      color: #991b1b;
+      margin-bottom: 0.5rem;
+    }
+
+    .non-gemini-text {
+      font-size: 0.875rem;
+      color: #7f1d1d;
+      line-height: 1.5;
+    }
+
+    /* Test Section - 顯示當前檢測到的對話標題 */
+    .test-section {
+      background: #fff7ed;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      border: 1px solid #fed7aa;
+    }
+
+    .test-section-header {
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .test-section-toggle {
+      font-size: 0.75rem;
+      margin-right: 0.5rem;
+      transition: transform 0.2s;
+      color: #9a3412;
+    }
+
+    .test-section-toggle.expanded {
+      transform: rotate(90deg);
+    }
+
+    .test-section-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #9a3412;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex: 1;
+    }
+
+    .test-info {
+      font-size: 0.8125rem;
+      color: #7c2d12;
+      line-height: 1.5;
+      margin-top: 0.5rem;
+      display: none;
+    }
+
+    .test-info.expanded {
+      display: block;
+    }
+
+    .test-info-row {
+      margin-bottom: 0.375rem;
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+    }
+
+    .test-info-label {
+      font-weight: 600;
+      color: #9a3412;
+      min-width: 60px;
+    }
+
+    .test-info-value {
+      flex: 1;
+      word-break: break-all;
+      color: #7c2d12;
+    }
+
+    .test-info-value.empty {
+      color: #c2410c;
+      font-style: italic;
+    }
+
+    .test-info-value.success {
+      color: #166534;
+      font-weight: 500;
+    }
+
+    /* Send Message Section */
+    .send-message-section {
+      background: #eff6ff;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      border: 1px solid #bfdbfe;
+    }
+
+    .send-message-header {
+      margin-bottom: 0.5rem;
+    }
+
+    .send-message-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #1e40af;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .send-message-input-container {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .send-message-input {
+      width: 100%;
+      padding: 0.5rem;
+      border: 1px solid #bfdbfe;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      font-family: inherit;
+      resize: vertical;
+      background: white;
+      color: #1e293b;
+      transition: border-color 0.2s;
+    }
+
+    .send-message-input:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .send-message-input::placeholder {
+      color: #94a3b8;
+    }
+
+    .btn-send-message {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 0.375rem;
+      padding: 0.5rem 1rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+      align-self: flex-end;
+    }
+
+    .btn-send-message:hover:not(:disabled) {
+      background: #2563eb;
+    }
+
+    .btn-send-message:active:not(:disabled) {
+      background: #1d4ed8;
+    }
+
+    .btn-send-message:disabled {
+      background: #cbd5e1;
+      cursor: not-allowed;
+    }
+
+    /* Send message attach */
+    .btn-attach {
+      background: #0ea5e9;
+    }
+    .btn-attach:hover:not(:disabled) {
+      background: #0284c7;
+    }
+    .send-message-attachment {
+      margin-top: 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.5rem 0.625rem;
+      border: 1px solid #e2e8f0;
+      border-radius: 0.5rem;
+      background: #f1f5f9;
+      color: #334155;
+      font-size: 0.8125rem;
+    }
+    .send-message-attachment-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 220px;
+    }
+    .send-message-attachment-remove {
+      border: 1px solid #e2e8f0;
+      background: white;
+      color: #0f172a;
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .send-message-attachment-remove:hover {
+      background: #fee2e2;
+      border-color: #fecaca;
+    }
+
+    /* Conversation History Section */
+    .conversation-history-section {
+      background: #f0fdf4;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      border: 1px solid #bbf7d0;
+    }
+
+    .conversation-history-header {
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+      gap: 0.5rem;
+    }
+
+    .conversation-history-toggle {
+      font-size: 0.75rem;
+      transition: transform 0.2s;
+      color: #166534;
+    }
+
+    .conversation-history-toggle.expanded {
+      transform: rotate(90deg);
+    }
+
+    .conversation-history-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #166534;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex: 1;
+    }
+
+    .btn-backup {
+      background: transparent;
+      border: none;
+      color: #166534;
+      font-size: 1rem;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      transition: background 0.2s;
+    }
+
+    .btn-backup:hover {
+      background: #dcfce7;
+    }
+
+    .conversation-history-content {
+      display: none;
+      margin-top: 0.5rem;
+      max-height: 600px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: #cbd5e1 #f1f5f9;
+    }
+
+    .conversation-history-content::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .conversation-history-content::-webkit-scrollbar-track {
+      background: #f1f5f9;
+      border-radius: 4px;
+    }
+
+    .conversation-history-content::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+
+    .conversation-history-content::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+
+    .conversation-history-content.expanded {
+      display: block;
+    }
+
+    /* Generated Images Display */
+    .image-generation-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 1rem;
+      padding: 1rem;
+    }
+
+    .image-card {
+      background: white;
+      border-radius: 0.5rem;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      overflow: hidden;
+      transition: transform 0.2s, box-shadow 0.2s;
+      border: 1px solid #e2e8f0;
+    }
+
+    .image-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    }
+
+    .image-card-header {
+      padding: 0.5rem 0.75rem;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .image-timestamp {
+      font-size: 0.6875rem;
+      color: #64748b;
+      margin: 0;
+    }
+
+    .generated-image-preview {
+      width: 100%;
+      height: auto;
+      display: block;
+      object-fit: cover;
+      aspect-ratio: 1;
+      background: #f1f5f9;
+    }
+
+    .image-error {
+      padding: 1rem;
+      text-align: center;
+      color: #ef4444;
+      font-size: 0.875rem;
+      background: #fee2e2;
+    }
+
+    .image-card-actions {
+      padding: 0.75rem;
+      border-top: 1px solid #e2e8f0;
+      background: #f8fafc;
+    }
+
+    .btn-download {
+      width: 100%;
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-download:hover {
+      background: #2563eb;
+    }
+
+    .btn-download:active {
+      transform: scale(0.98);
+    }
+
+    .conversation-messages {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      padding: 0.5rem;
+      min-height: 100%;
+    }
+
+    .conversation-message {
+      padding: 0.875rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      line-height: 1.7;
+      word-wrap: break-word;
+      word-break: break-word;
+      overflow-wrap: break-word;
+      white-space: pre-wrap;
+      max-width: 100%;
+      overflow: visible;
+      min-width: 0;
+      display: inline-block;
+    }
+
+    .conversation-message.user {
+      background: #dbeafe;
+      color: #1e3a8a;
+      align-self: flex-end;
+      margin-left: auto;
+      margin-right: 0.5rem;
+      text-align: right;
+    }
+
+    .conversation-message.assistant {
+      background: #dcfce7;
+      color: #166534;
+      align-self: flex-start;
+      margin-left: 0.5rem;
+      margin-right: auto;
+      text-align: left;
+    }
+
+    .conversation-message.unknown {
+      background: #f1f5f9;
+      color: #475569;
+    }
+
+    .conversation-message-role {
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+      text-transform: uppercase;
+      opacity: 0.7;
+    }
+
+    .conversation-message-text {
+      white-space: pre-wrap;
+    }
+
+    .conversation-message-time {
+      font-size: 0.6875rem;
+      opacity: 0.6;
+      margin-top: 0.25rem;
+    }
+
+    .empty-message {
+      text-align: center;
+      padding: 2rem 1rem;
+      color: #94a3b8;
+      font-size: 0.875rem;
+      font-style: italic;
+    }
+
+    /* Search Section */
+    .search-section {
+      background: white;
+      border-radius: 0.5rem;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      border: 1px solid #e2e8f0;
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 0.5rem;
+      border: 1px solid #cbd5e1;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      background: white;
+      color: #1e293b;
+      transition: border-color 0.2s;
+    }
+
+    .search-input:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .search-input::placeholder {
+      color: #94a3b8;
+    }
+
+    /* Categories Section */
+    .categories-section {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .category-item {
+      background: white;
+      border-radius: 0.375rem;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+      border: 1px solid #e2e8f0;
+      overflow: hidden;
+      margin-bottom: 0.5rem;
+    }
+
+    .category-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5rem 0.75rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .category-header:hover {
+      background: #f8fafc;
+    }
+
+    .category-header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex: 1;
+    }
+
+    .category-toggle {
+      width: 16px;
+      height: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #64748b;
+      font-size: 0.6875rem;
+      transition: transform 0.2s;
+    }
+
+    .category-toggle.expanded {
+      transform: rotate(90deg);
+    }
+
+    .category-name {
+      font-size: 0.8125rem;
+      font-weight: 500;
+      color: #1e293b;
+    }
+
+    .category-header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+
+    .btn-add-to-category {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 0.25rem;
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-weight: 600;
+      transition: all 0.15s;
+      flex-shrink: 0;
+      padding: 0;
+    }
+
+    .btn-add-to-category:hover:not(:disabled) {
+      background: #2563eb;
+      transform: scale(1.1);
+    }
+
+    .btn-add-to-category:active:not(:disabled) {
+      transform: scale(0.95);
+    }
+
+    .btn-add-to-category:disabled,
+    .btn-add-to-category.added {
+      background: #10b981;
+      cursor: not-allowed;
+    }
+
+    .category-count {
+      font-size: 0.6875rem;
+      color: #64748b;
+      background: #f1f5f9;
+      padding: 0.125rem 0.3125rem;
+      border-radius: 0.1875rem;
+      line-height: 1.2;
+    }
+
+    .category-conversations {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease-out;
+    }
+
+    .category-conversations.expanded {
+      max-height: 2000px;
+      transition: max-height 0.3s ease-in;
+    }
+
+    .category-conversations-list {
+      padding: 0.25rem 0.5rem;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .conversation-item {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.5rem;
+      border-bottom: 1px solid #e2e8f0;
+      transition: background 0.15s;
+      border-radius: 0.25rem;
+      margin-bottom: 0.125rem;
+    }
+
+    .conversation-item:hover {
+      background: #f8fafc;
+    }
+
+    .conversation-item:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+    }
+
+    .conversation-item-content {
+      flex: 1;
+      cursor: pointer;
+      min-width: 0; /* 允許收縮 */
+    }
+
+    .btn-assign-category {
+      background: transparent;
+      border: none;
+      color: #64748b;
+      font-size: 0.875rem;
+      cursor: pointer;
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+      transition: all 0.15s;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+
+    .btn-assign-category:hover {
+      background: #e2e8f0;
+      color: #1e293b;
+    }
+
+    .conversation-item-title {
+      font-size: 0.8125rem;
+      line-height: 1.4;
+      font-weight: 500;
+      color: #1e293b;
+      margin-bottom: 0.25rem;
+      word-break: break-word;
+    }
+
+    .conversation-item-meta {
+      font-size: 0.75rem;
+      color: #64748b;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .conversation-item-category {
+      background: #e0e7ff;
+      color: #4338ca;
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+      font-weight: 500;
+    }
+
+    /* Category assignment menu */
+    .category-menu {
+      position: absolute;
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 0.5rem;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      padding: 0.5rem;
+      z-index: 1000;
+      max-height: 200px;
+      overflow-y: auto;
+      min-width: 150px;
+    }
+
+    .category-menu-item {
+      padding: 0.5rem 0.75rem;
+      cursor: pointer;
+      border-radius: 0.25rem;
+      font-size: 0.875rem;
+      transition: background 0.15s;
+    }
+
+    .category-menu-item:hover {
+      background: #f8fafc;
+    }
+
+    .category-menu-title {
+      padding: 0.75rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #64748b;
+      border-bottom: 1px solid #e2e8f0;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .category-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      cursor: pointer;
+      border-radius: 0.25rem;
+      font-size: 0.875rem;
+      transition: background 0.15s;
+    }
+
+    .category-menu-item:hover {
+      background: #f8fafc;
+    }
+
+    .category-menu-item.checked {
+      background: #e0e7ff;
+      color: #4338ca;
+    }
+
+    .category-checkbox {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+      accent-color: #3b82f6;
+    }
+
+    .category-menu-label {
+      flex: 1;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .category-menu-divider {
+      height: 1px;
+      background: #e2e8f0;
+      margin: 0.25rem 0;
+    }
+
+    .category-menu-item.remove {
+      color: #ef4444;
+      border-top: 1px solid #e2e8f0;
+      margin-top: 0.25rem;
+      padding-top: 0.75rem;
+    }
+
+    .category-menu-item.remove:hover {
+      background: #fee2e2;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 2rem 1rem;
+      color: #94a3b8;
+      font-size: 0.875rem;
+    }
+
+    /* Modal for adding category */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.show {
+      display: flex;
+    }
+
+    .modal {
+      background: white;
+      border-radius: 0.5rem;
+      padding: 1.5rem;
+      width: 90%;
+      max-width: 320px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+    }
+
+    .modal-title {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: #1e293b;
+    }
+
+    .modal-input {
+      width: 100%;
+      padding: 0.5rem;
+      border: 1px solid #cbd5e1;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      margin-bottom: 1rem;
+    }
+
+    .modal-input:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #3b82f6;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #2563eb;
+    }
+
+    .btn-secondary {
+      background: #f1f5f9;
+      color: #475569;
+    }
+
+    .btn-secondary:hover {
+      background: #e2e8f0;
+    }
+
+    /* Scrollbar styling */
+    .category-conversations-list::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .category-conversations-list::-webkit-scrollbar-track {
+      background: #f1f5f9;
+      border-radius: 3px;
+    }
+
+    .category-conversations-list::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 3px;
+    }
+
+    .category-conversations-list::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+
+    /* Toast notification */
+    .toast {
+      position: fixed;
+      bottom: 1rem;
+      right: 1rem;
+      background: #1e293b;
+      color: white;
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      opacity: 0;
+      transform: translateY(1rem);
+      transition: opacity 0.3s, transform 0.3s;
+      pointer-events: none;
+      z-index: 2000;
+      max-width: 300px;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* All Images Record Section */
+    .images-record-section {
+      background: #fef3c7;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      border: 1px solid #fde68a;
+    }
+
+    .images-record-header {
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+      gap: 0.5rem;
+    }
+
+    .images-record-toggle {
+      font-size: 0.75rem;
+      transition: transform 0.2s;
+      color: #92400e;
+    }
+
+    .images-record-toggle.expanded {
+      transform: rotate(90deg);
+    }
+
+    .images-record-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #92400e;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex: 1;
+    }
+
+    .btn-refresh-images {
+      background: transparent;
+      border: none;
+      color: #92400e;
+      font-size: 1rem;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      transition: background 0.2s, transform 0.2s;
+    }
+
+    .btn-refresh-images:hover {
+      background: #fde68a;
+      transform: rotate(180deg);
+    }
+
+    .images-record-content {
+      display: none;
+      margin-top: 0.5rem;
+      max-height: 600px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: #cbd5e1 #f1f5f9;
+    }
+
+    .images-record-content::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .images-record-content::-webkit-scrollbar-track {
+      background: #f1f5f9;
+      border-radius: 4px;
+    }
+
+    .images-record-content::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+
+    .images-record-content::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+
+    .images-record-content.expanded {
+      display: block;
+    }
+
+    .images-record-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    /* Operation Logs Monitor Section */
+    .operation-logs-section {
+      background: #e0e7ff;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      border: 1px solid #c7d2fe;
+    }
+
+    .operation-logs-header {
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+      gap: 0.5rem;
+    }
+
+    .operation-logs-toggle {
+      font-size: 0.75rem;
+      transition: transform 0.2s;
+      color: #4338ca;
+    }
+
+    .operation-logs-toggle.expanded {
+      transform: rotate(90deg);
+    }
+
+    .operation-logs-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #4338ca;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex: 1;
+    }
+
+    .btn-export-logs, .btn-refresh-logs {
+      background: transparent;
+      border: none;
+      color: #4338ca;
+      font-size: 0.875rem;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      transition: background 0.2s, transform 0.2s;
+    }
+
+    .btn-export-logs:hover, .btn-refresh-logs:hover {
+      background: #c7d2fe;
+    }
+
+    .btn-refresh-logs:hover {
+      transform: rotate(180deg);
+    }
+
+    .operation-logs-content {
+      display: none;
+      margin-top: 0.5rem;
+      max-height: 400px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: #cbd5e1 #f1f5f9;
+    }
+
+    .operation-logs-content::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .operation-logs-content::-webkit-scrollbar-track {
+      background: #f1f5f9;
+      border-radius: 4px;
+    }
+
+    .operation-logs-content::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+
+    .operation-logs-content::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+
+    .operation-logs-content.expanded {
+      display: block;
+    }
+
+    .operation-logs-stats {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.75rem;
+      background: white;
+      border-radius: 0.375rem;
+      border: 1px solid #c7d2fe;
+      margin-bottom: 0.75rem;
+    }
+
+    .logs-stat-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.75rem;
+    }
+
+    .logs-stat-label {
+      font-weight: 600;
+      color: #4338ca;
+    }
+
+    .logs-stat-value {
+      color: #1e293b;
+      font-family: monospace;
+      word-break: break-all;
+      text-align: right;
+      flex: 1;
+      margin-left: 0.5rem;
+    }
+
+    .operation-logs-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .log-entry {
+      background: white;
+      border-radius: 0.375rem;
+      padding: 0.75rem;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      font-size: 0.75rem;
+    }
+
+    .log-entry-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.5rem;
+      gap: 0.5rem;
+    }
+
+    .log-entry-operation {
+      font-weight: 600;
+      color: #4338ca;
+      flex: 1;
+    }
+
+    .log-entry-download-btn {
+      background: #4338ca;
+      color: white;
+      border: none;
+      border-radius: 0.25rem;
+      padding: 0.25rem 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+
+    .log-entry-download-btn:hover {
+      background: #3730a3;
+    }
+
+    .log-entry-download-btn:active {
+      background: #312e81;
+    }
+
+    .log-entry-time {
+      color: #64748b;
+      font-size: 0.6875rem;
+      white-space: nowrap;
+    }
+
+    .log-entry-details {
+      color: #475569;
+      font-size: 0.6875rem;
+      line-height: 1.4;
+    }
+
+    .log-entry-url {
+      color: #3b82f6;
+      word-break: break-all;
+      margin-top: 0.25rem;
+      font-family: monospace;
+    }
+
+    .image-record-item {
+      background: white;
+      border-radius: 0.375rem;
+      padding: 0.75rem;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      transition: box-shadow 0.2s;
+    }
+
+    .image-record-item:hover {
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    .image-record-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.5rem;
+      gap: 0.5rem;
+    }
+
+    .image-record-id {
+      font-size: 0.6875rem;
+      font-family: monospace;
+      color: #64748b;
+      word-break: break-all;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .image-record-status {
+      font-size: 0.6875rem;
+      font-weight: 600;
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .image-record-status.downloaded {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .image-record-status.downloading {
+      background: #dbeafe;
+      color: #1e40af;
+    }
+
+    .image-record-status.failed {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .image-record-status.pending {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .image-record-url {
+      font-size: 0.75rem;
+      color: #1e293b;
+      word-break: break-all;
+      margin-bottom: 0.5rem;
+      padding: 0.5rem;
+      background: #f8fafc;
+      border-radius: 0.25rem;
+      border: 1px solid #e2e8f0;
+      font-family: monospace;
+      line-height: 1.4;
+      max-height: 80px;
+      overflow-y: auto;
+    }
+
+    .image-record-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      font-size: 0.6875rem;
+      color: #64748b;
+    }
+
+    .image-record-meta-item {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .image-record-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid #e2e8f0;
+    }
+
+    .btn-copy-url {
+      flex: 1;
+      background: #f1f5f9;
+      color: #475569;
+      border: 1px solid #e2e8f0;
+      border-radius: 0.25rem;
+      padding: 0.375rem 0.5rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-copy-url:hover {
+      background: #e2e8f0;
+    }
+
+    .btn-view-image {
+      flex: 1;
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 0.25rem;
+      padding: 0.375rem 0.5rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-view-image:hover {
+      background: #2563eb;
+    }
+
+    .btn-redownload {
+      flex: 1;
+      background: #10b981;
+      color: white;
+      border: none;
+      border-radius: 0.25rem;
+      padding: 0.375rem 0.5rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-redownload:hover {
+      background: #059669;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Gemini 對話分類助手</h1>
+    </div>
+
+    <!-- Profile Selector Section -->
+    <div class="profile-selector-section">
+      <span class="profile-selector-label">用戶檔案：</span>
+      <select class="profile-selector" id="profileSelector">
+        <option value="default">預設檔案</option>
+      </select>
+    </div>
+
+    <!-- Actions Section -->
+    <div class="actions-section">
+      <button class="btn-new-chat" id="newChatBtn">+ 新開對話</button>
+      <button class="btn-pause-monitoring" id="pauseMonitoringBtn">⏸️ 暫停監控</button>
+      <div style="display: flex; gap: 0.5rem; margin-top: 0.75rem;">
+        <button class="btn-auto-suggest" id="autoSuggestBtn" title="自動建議分類">✨ 自動建議</button>
+        <button class="btn-add-category" id="addCategoryBtn">+ 新增分類</button>
+      </div>
+    </div>
+
+    <!-- Non-Gemini Page Message (隱藏，僅在非 Gemini 頁面時顯示) -->
+    <div class="non-gemini-message" id="nonGeminiMessage" style="display: none;">
+      <div class="non-gemini-icon">⚠️</div>
+      <div class="non-gemini-title">不在 Gemini 頁面</div>
+      <div class="non-gemini-text">請在 Google Gemini 頁面上使用此擴充功能</div>
+      <button class="btn-new-chat" id="openGeminiBtn" style="margin-top: 1rem;">打開 Gemini</button>
+    </div>
+
+    <!-- Test Section - 顯示當前檢測到的對話標題 -->
+    <div class="test-section" id="testSection">
+      <div class="test-section-header" id="testSectionHeader">
+        <span class="test-section-toggle" id="testSectionToggle">▶</span>
+        <span class="test-section-title">🔍 測試：當前檢測到的對話</span>
+      </div>
+      <div class="test-info" id="testInfo">
+        <div class="test-info-row">
+          <span class="test-info-label">用戶檔案:</span>
+          <span class="test-info-value" id="testUserProfile">尚未檢測到</span>
+        </div>
+        <div class="test-info-row">
+          <span class="test-info-label">Chat ID:</span>
+          <span class="test-info-value" id="testChatId">尚未檢測到</span>
+        </div>
+        <div class="test-info-row">
+          <span class="test-info-label">標題:</span>
+          <span class="test-info-value" id="testTitle">尚未檢測到</span>
+        </div>
+        <div class="test-info-row">
+          <span class="test-info-label">URL:</span>
+          <span class="test-info-value" id="testUrl">尚未檢測到</span>
+        </div>
+        <div class="test-info-row">
+          <span class="test-info-label">消息數量:</span>
+          <span class="test-info-value" id="testMessageCount">尚未載入</span>
+        </div>
+        <div class="test-info-row">
+          <span class="test-info-label">對話記錄:</span>
+          <div class="test-info-value" id="testMessages" style="max-height: 200px; overflow-y: auto; font-size: 0.75rem; line-height: 1.4;">
+            <div style="color: #64748b; font-style: italic;">尚未載入</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Send Message Section - 從側邊欄發送消息 -->
+    <div class="send-message-section" id="sendMessageSection">
+      <div class="send-message-header">
+        <span class="send-message-title">💬 發送消息</span>
+      </div>
+      <div class="send-message-input-container">
+        <input type="file" id="sendMessageFileInput" accept="image/*" style="display:none;" />
+        <textarea class="send-message-input" id="sendMessageInput" placeholder="輸入消息..." rows="3"></textarea>
+        <button class="btn-send-message btn-attach" id="sendMessageAttachBtn" title="上傳圖片">上傳</button>
+        <button class="btn-send-message" id="sendMessageBtn" title="發送消息">發送</button>
+      </div>
+      <div class="send-message-attachment" id="sendMessageAttachment" style="display:none;">
+        <span class="send-message-attachment-name" id="sendMessageAttachmentName"></span>
+        <button class="send-message-attachment-remove" id="sendMessageAttachmentRemove" title="移除">×</button>
+      </div>
+    </div>
+
+    <!-- Conversation List Section - 對話列表 -->
+    <div class="conversation-list-section" id="conversationListSection" style="background: #f0fdf4; border-radius: 0.5rem; padding: 0.75rem 1rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); border: 1px solid #bbf7d0;">
+      <div class="conversation-list-header" id="conversationListHeader" style="display: flex; align-items: center; cursor: pointer; user-select: none; gap: 0.5rem;">
+        <span class="conversation-list-toggle" id="conversationListToggle" style="font-size: 0.75rem; transition: transform 0.2s; color: #166534;">▶</span>
+        <span class="conversation-list-title" style="font-size: 0.75rem; font-weight: 600; color: #166534; text-transform: uppercase; letter-spacing: 0.05em; flex: 1;">📋 所有對話</span>
+        <button class="btn-refresh-conversations" id="refreshConversationsBtn" title="刷新對話列表" style="background: transparent; border: none; color: #166534; font-size: 0.875rem; cursor: pointer; padding: 0.25rem 0.5rem; border-radius: 0.25rem; transition: background 0.2s, transform 0.2s;">🔄</button>
+      </div>
+      <div class="conversation-list-content" id="conversationListContent" style="display: none; margin-top: 0.5rem; max-height: 400px; overflow-y: auto; overflow-x: hidden;">
+        <div class="conversation-list-items" id="conversationListItems">
+          <div class="empty-state" style="text-align: center; padding: 2rem 1rem; color: #94a3b8; font-size: 0.875rem;">載入中...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Conversation History Section - 對話記錄 -->
+    <div class="conversation-history-section" id="conversationHistorySection">
+      <div class="conversation-history-header" id="conversationHistoryHeader">
+        <span class="conversation-history-toggle" id="conversationHistoryToggle">▶</span>
+        <span class="conversation-history-title">📝 對話記錄</span>
+        <button class="btn-backup" id="backupBtn" title="備份對話記錄">💾</button>
+      </div>
+      <div class="conversation-history-content" id="conversationHistoryContent">
+        <div class="conversation-messages" id="conversationMessages">
+          <div class="empty-message">請從上方對話列表中選擇一個對話</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- All Images Record Section - 所有圖片記錄和下載狀態 -->
+    <div class="images-record-section" id="imagesRecordSection">
+      <div class="images-record-header" id="imagesRecordHeader">
+        <span class="images-record-toggle" id="imagesRecordToggle">▶</span>
+        <span class="images-record-title">🖼️ 所有圖片記錄</span>
+        <button class="btn-refresh-images" id="refreshImagesBtn" title="刷新圖片記錄">🔄</button>
+      </div>
+      <div class="images-record-content" id="imagesRecordContent">
+        <div class="images-record-list" id="imagesRecordList">
+          <div class="empty-state">載入中...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Download Buttons Test Section - 下載按鈕測試 -->
+    <div class="operation-logs-section" id="downloadButtonsTestSection" style="background: #fef3c7; border-color: #fbbf24;">
+      <div class="operation-logs-header" id="downloadButtonsTestHeader">
+        <span class="operation-logs-toggle" id="downloadButtonsTestToggle">▶</span>
+        <span class="operation-logs-title">🧪 下載按鈕測試</span>
+        <button class="btn-refresh-logs" id="simulateClickBtn" title="模擬點擊第一個按鈕" style="margin-right: 0.25rem;">🖱️</button>
+        <button class="btn-refresh-logs" id="refreshDownloadButtonsBtn" title="刷新按鈕列表">🔄</button>
+      </div>
+      <div class="operation-logs-content" id="downloadButtonsTestContent" style="display: none;">
+        <div class="operation-logs-stats" id="downloadButtonsTestStats">
+          <div class="logs-stat-item">
+            <span class="logs-stat-label">監控到按鈕數:</span>
+            <span class="logs-stat-value" id="downloadButtonsCount">-</span>
+          </div>
+        </div>
+        <div class="operation-logs-list" id="downloadButtonsTestList">
+          <div class="empty-state">載入中...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Operation Logs Monitor Section - 操作日誌監控 -->
+    <div class="operation-logs-section" id="operationLogsSection">
+      <div class="operation-logs-header" id="operationLogsHeader">
+        <span class="operation-logs-toggle" id="operationLogsToggle">▶</span>
+        <span class="operation-logs-title">📊 操作日誌監控</span>
+        <button class="btn-export-logs" id="exportLogsBtn" title="導出日誌">💾</button>
+        <button class="btn-refresh-logs" id="refreshLogsBtn" title="刷新日誌">🔄</button>
+      </div>
+      <div class="operation-logs-content" id="operationLogsContent">
+        <div class="operation-logs-stats" id="operationLogsStats">
+          <div class="logs-stat-item">
+            <span class="logs-stat-label">總日誌數:</span>
+            <span class="logs-stat-value" id="logsTotalCount">-</span>
+          </div>
+          <div class="logs-stat-item">
+            <span class="logs-stat-label">最新時間:</span>
+            <span class="logs-stat-value" id="logsLatestTime">-</span>
+          </div>
+          <div class="logs-stat-item">
+            <span class="logs-stat-label">保存位置:</span>
+            <span class="logs-stat-value" id="logsStorageLocation">chrome.storage.local</span>
+          </div>
+        </div>
+        <div class="operation-logs-list" id="operationLogsList">
+          <div class="empty-state">載入中...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Click Monitor Records Section - 點擊監聽記錄 -->
+    <div class="operation-logs-section" id="clickMonitorSection" style="background: #f0fdf4; border-color: #86efac;">
+      <div class="operation-logs-header" id="clickMonitorHeader">
+        <span class="operation-logs-toggle" id="clickMonitorToggle">▶</span>
+        <span class="operation-logs-title">📹 點擊監聽記錄</span>
+        <button class="btn-export-logs" id="exportClickMonitorBtn" title="導出記錄">💾</button>
+        <button class="btn-refresh-logs" id="clearClickMonitorBtn" title="清除記錄">🗑️</button>
+        <button class="btn-refresh-logs" id="refreshClickMonitorBtn" title="刷新記錄">🔄</button>
+      </div>
+      <div class="operation-logs-content" id="clickMonitorContent" style="display: none;">
+        <div class="operation-logs-stats" id="clickMonitorStats">
+          <div class="logs-stat-item">
+            <span class="logs-stat-label">記錄數:</span>
+            <span class="logs-stat-value" id="clickMonitorCount">-</span>
+          </div>
+          <div class="logs-stat-item">
+            <span class="logs-stat-label">最新時間:</span>
+            <span class="logs-stat-value" id="clickMonitorLatestTime">-</span>
+          </div>
+        </div>
+        <div class="operation-logs-list" id="clickMonitorList">
+          <div class="empty-state">載入中...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- R2 Storage Section - Cloudflare R2 儲存 -->
+    <div class="operation-logs-section" id="r2StorageSection" style="background: #e0f2fe; border-color: #7dd3fc;">
+      <div class="operation-logs-header" id="r2StorageHeader">
+        <span class="operation-logs-toggle" id="r2StorageToggle">▶</span>
+        <span class="operation-logs-title">☁️ Cloudflare R2 儲存</span>
+        <button class="btn-refresh-logs" id="r2TestConnectionBtn" title="測試連接">🔌</button>
+      </div>
+      <div class="operation-logs-content" id="r2StorageContent" style="display: none;">
+        <!-- R2 配置表單 -->
+        <div class="operation-logs-stats" id="r2ConfigForm" style="background: white; padding: 1rem; border-radius: 0.375rem; margin-bottom: 0.75rem;">
+          <div style="margin-bottom: 0.75rem;">
+            <label style="display: block; font-size: 0.75rem; font-weight: 600; color: #4338ca; margin-bottom: 0.25rem;">Account ID:</label>
+            <input type="text" id="r2AccountId" class="search-input" placeholder="輸入 R2 Account ID" style="font-size: 0.8125rem;">
+          </div>
+          <div style="margin-bottom: 0.75rem;">
+            <label style="display: block; font-size: 0.75rem; font-weight: 600; color: #4338ca; margin-bottom: 0.25rem;">Access Key ID:</label>
+            <input type="text" id="r2AccessKeyId" class="search-input" placeholder="輸入 Access Key ID" style="font-size: 0.8125rem;">
+          </div>
+          <div style="margin-bottom: 0.75rem;">
+            <label style="display: block; font-size: 0.75rem; font-weight: 600; color: #4338ca; margin-bottom: 0.25rem;">Secret Access Key:</label>
+            <input type="password" id="r2SecretAccessKey" class="search-input" placeholder="輸入 Secret Access Key" style="font-size: 0.8125rem;">
+          </div>
+          <div style="margin-bottom: 0.75rem;">
+            <label style="display: block; font-size: 0.75rem; font-weight: 600; color: #4338ca; margin-bottom: 0.25rem;">Bucket Name:</label>
+            <input type="text" id="r2Bucket" class="search-input" placeholder="輸入 Bucket 名稱" style="font-size: 0.8125rem;">
+          </div>
+          <div style="margin-bottom: 0.75rem;">
+            <label style="display: block; font-size: 0.75rem; font-weight: 600; color: #4338ca; margin-bottom: 0.25rem;">Endpoint (可選):</label>
+            <input type="text" id="r2Endpoint" class="search-input" placeholder="自定義端點 URL (可選)" style="font-size: 0.8125rem;">
+          </div>
+          <div style="display: flex; gap: 0.5rem;">
+            <button class="btn-primary" id="r2SaveConfigBtn" style="flex: 1; padding: 0.5rem; font-size: 0.8125rem;">💾 保存配置</button>
+            <button class="btn-secondary" id="r2LoadConfigBtn" style="flex: 1; padding: 0.5rem; font-size: 0.8125rem;">📥 載入配置</button>
+          </div>
+          <div id="r2ConfigStatus" style="margin-top: 0.5rem; font-size: 0.75rem; color: #64748b; min-height: 1.2rem;"></div>
+        </div>
+
+        <!-- R2 操作按鈕 -->
+        <div class="operation-logs-stats" style="background: white; padding: 1rem; border-radius: 0.375rem; margin-bottom: 0.75rem;">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 0.5rem;">
+            <button class="btn-primary" id="r2UploadCurrentBtn" style="padding: 0.5rem; font-size: 0.8125rem;">📤 上傳當前對話</button>
+            <button class="btn-primary" id="r2UploadAllBtn" style="padding: 0.5rem; font-size: 0.8125rem;">📤 上傳所有對話</button>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+            <button class="btn-secondary" id="r2ListBtn" style="padding: 0.5rem; font-size: 0.8125rem;">📋 列出 R2 對話</button>
+            <button class="btn-secondary" id="r2SyncBtn" style="padding: 0.5rem; font-size: 0.8125rem;">⬇️ 同步到本地</button>
+          </div>
+        </div>
+
+        <!-- R2 操作結果 -->
+        <div class="operation-logs-list" id="r2ResultsList">
+          <div class="empty-state">等待操作...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Search Section -->
+    <div class="search-section">
+      <input type="text" class="search-input" id="searchInput" placeholder="搜尋對話標題...">
+    </div>
+
+    <!-- Categories List with Conversations -->
+    <div class="categories-section" id="categoriesSection">
+      <!-- 分類列表將在這裡動態生成 -->
+    </div>
+  </div>
+
+  <!-- Modal for adding category -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <div class="modal-title" id="modalTitle">新增分類</div>
+      <input type="text" class="modal-input" id="categoryInput" placeholder="輸入分類名稱" maxlength="50">
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="cancelBtn">取消</button>
+        <button class="btn btn-primary" id="confirmBtn">確認</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast notification -->
+  <div class="toast" id="toast"></div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

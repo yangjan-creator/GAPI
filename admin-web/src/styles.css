@@ -1,0 +1,658 @@
+/* Minimal Gemini-like admin UI (no external deps) */
+
+:root {
+  color-scheme: light;
+  --bg: #0b1220;
+  --panel: #0f172a;
+  --panel2: #111c33;
+  --border: rgba(148, 163, 184, 0.18);
+  --text: #e2e8f0;
+  --muted: rgba(226, 232, 240, 0.7);
+  --muted2: rgba(226, 232, 240, 0.55);
+  --blue: #3b82f6;
+  --green: #10b981;
+  --red: #ef4444;
+  --shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji';
+  background: radial-gradient(1200px 600px at 20% -10%, rgba(59, 130, 246, 0.2), transparent 55%),
+    radial-gradient(900px 450px at 90% 0%, rgba(16, 185, 129, 0.15), transparent 55%),
+    var(--bg);
+  color: var(--text);
+}
+
+.appShell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.topBar {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(10px);
+}
+
+.brandTitle {
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+.brandSub {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.connect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btnIcon {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(2, 6, 23, 0.22);
+  color: rgba(226, 232, 240, 0.85);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.btnIcon:hover {
+  background: rgba(2, 6, 23, 0.42);
+}
+
+.mainGrid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 360px 1fr;
+}
+
+.sidebar {
+  border-right: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panelHeader {
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panelTitle {
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.panelBody {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 60px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.openTabs {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.18);
+  overflow: hidden;
+}
+.openTabsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+.openTabsTitleBtn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.openTabsTitleBtn:hover {
+  color: rgba(226, 232, 240, 0.85);
+}
+.openTabsRight {
+  display: flex;
+  align-items: center;
+}
+.chev {
+  display: inline-block;
+  transform: rotate(0deg);
+  transition: transform 0.16s ease;
+  opacity: 0.7;
+}
+.chevOpen {
+  transform: rotate(90deg);
+}
+.btnSmall {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(2, 6, 23, 0.28);
+  color: rgba(226, 232, 240, 0.85);
+  border-radius: 10px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.btnSmall:hover {
+  background: rgba(2, 6, 23, 0.45);
+}
+.btnSmall:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.openTabsList {
+  max-height: 220px;
+  overflow: auto;
+}
+.openTabsListHidden {
+  display: none;
+}
+.openTabsEmpty {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.openTabItem {
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+.openTabTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(226, 232, 240, 0.7);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.openTabTitle {
+  font-size: 13px;
+  color: rgba(226, 232, 240, 0.92);
+  line-height: 1.25;
+  margin-bottom: 8px;
+}
+.openTabActions {
+  display: flex;
+  gap: 8px;
+}
+.btnTiny {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(2, 6, 23, 0.25);
+  color: rgba(226, 232, 240, 0.85);
+  border-radius: 10px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.btnTiny:hover {
+  background: rgba(2, 6, 23, 0.45);
+}
+
+.label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.input,
+.select,
+.textarea {
+  background: rgba(2, 6, 23, 0.55);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: rgba(226, 232, 240, 0.35);
+}
+
+.select {
+  padding: 9px 10px;
+}
+
+.btn,
+.btnPrimary {
+  border: 1px solid var(--border);
+  background: rgba(2, 6, 23, 0.35);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: rgba(2, 6, 23, 0.55);
+}
+
+.btnPrimary {
+  background: rgba(59, 130, 246, 0.22);
+  border-color: rgba(59, 130, 246, 0.45);
+}
+.btnPrimary:hover {
+  background: rgba(59, 130, 246, 0.32);
+}
+.btnPrimary:disabled,
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.statusPill {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.statusPill.ok {
+  color: rgba(16, 185, 129, 0.9);
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.1);
+}
+.statusPill.warn {
+  color: rgba(239, 68, 68, 0.9);
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.convList {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.22);
+}
+
+.convItem {
+  width: 100%;
+  text-align: left;
+  padding: 12px 12px;
+  border: none;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.convItem:hover {
+  background: rgba(148, 163, 184, 0.08);
+}
+.convItem.active {
+  background: rgba(59, 130, 246, 0.12);
+}
+.convTitle {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+  margin-bottom: 6px;
+}
+.convMeta {
+  font-size: 12px;
+  color: var(--muted2);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.22);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: rgba(226, 232, 240, 0.92);
+}
+.dot {
+  opacity: 0.6;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.empty {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.chatPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: rgba(2, 6, 23, 0.12);
+}
+
+.chatHeader {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.chatTitle {
+  font-weight: 650;
+  margin-bottom: 6px;
+}
+.chatSub {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.link {
+  color: rgba(147, 197, 253, 0.95);
+  text-decoration: none;
+}
+.link:hover {
+  text-decoration: underline;
+}
+
+.chatBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 18px 20px;
+}
+
+.emptyChat {
+  color: var(--muted);
+  font-size: 14px;
+  padding: 16px;
+  border: 1px dashed rgba(148, 163, 184, 0.25);
+  border-radius: 14px;
+  max-width: 720px;
+}
+
+.chatComposer {
+  border-top: 1px solid var(--border);
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr 210px;
+  gap: 10px;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.textarea {
+  resize: none;
+  min-height: 44px;
+}
+
+.composerRight {
+  display: grid;
+  grid-template-columns: 74px 1fr;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.btnAttach {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(2, 6, 23, 0.22);
+  color: rgba(226, 232, 240, 0.85);
+  border-radius: 12px;
+  padding: 10px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.btnAttach:hover {
+  background: rgba(2, 6, 23, 0.42);
+}
+.btnAttach:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.attachPreview {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(2, 6, 23, 0.35);
+  height: 100%;
+  min-height: 44px;
+}
+.attachPreview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.btnRemove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(2, 6, 23, 0.6);
+  color: rgba(226, 232, 240, 0.9);
+  cursor: pointer;
+  line-height: 24px;
+  text-align: center;
+}
+.btnRemove:hover {
+  background: rgba(2, 6, 23, 0.75);
+}
+
+.msgRow {
+  display: flex;
+  margin-bottom: 14px;
+}
+.msgRowUser {
+  justify-content: flex-end;
+}
+.msgRowAssistant {
+  justify-content: flex-start;
+}
+
+.msgBubble {
+  max-width: 820px;
+  border-radius: 16px;
+  padding: 12px 12px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow: var(--shadow);
+  background: rgba(15, 23, 42, 0.6);
+}
+.msgUser {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.24);
+}
+.msgAssistant {
+  background: rgba(15, 23, 42, 0.6);
+}
+.msgUnknown {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.22);
+}
+
+.msgMeta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.msgRole {
+  font-weight: 650;
+  color: rgba(226, 232, 240, 0.9);
+}
+.msgTime {
+  color: rgba(226, 232, 240, 0.55);
+}
+
+.msgText {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+  font-size: 14px;
+}
+
+.codeBlocks {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+.codeBlock {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(2, 6, 23, 0.55);
+}
+.codeBlockHeader {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.btnCopy {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(2, 6, 23, 0.25);
+  color: rgba(226, 232, 240, 0.85);
+  border-radius: 10px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.btnCopy:hover {
+  background: rgba(2, 6, 23, 0.45);
+}
+.codePre {
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.typingBubble {
+  border-radius: 16px;
+  padding: 14px 16px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.6);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: var(--shadow);
+}
+.typingBubble span {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.65);
+  display: inline-block;
+  animation: pulse 1.2s infinite ease-in-out;
+}
+.typingBubble .dot2 {
+  animation-delay: 0.15s;
+}
+.typingBubble .dot3 {
+  animation-delay: 0.3s;
+}
+@keyframes pulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 0.9;
+    transform: translateY(-2px);
+  }
+}
+
+.imagesGrid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.imageTile {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(2, 6, 23, 0.45);
+  text-decoration: none;
+  color: inherit;
+  display: block;
+}
+.imageTile img {
+  width: 100%;
+  height: 140px;
+  object-fit: cover;
+  display: block;
+}
+.imagePlaceholder {
+  height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(226, 232, 240, 0.55);
+  font-size: 12px;
+}
+
+.toastError {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 360px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 14px;
+  padding: 12px 12px 10px;
+  box-shadow: var(--shadow);
+}
+.toastTitle {
+  font-size: 12px;
+  color: rgba(239, 68, 68, 0.9);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.toastMsg {
+  font-size: 13px;
+  color: rgba(226, 232, 240, 0.85);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+

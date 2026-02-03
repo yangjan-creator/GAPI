@@ -1,0 +1,7 @@
+/* Content Script 樣式 */
+/* 隱藏原始下載按鈕的樣式 */
+
+.download-generated-image-button {
+  opacity: 0.3 !important;
+  pointer-events: none !important;
+}
