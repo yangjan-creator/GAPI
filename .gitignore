@@ -1,3 +1,46 @@
-# dependencies
+# Dependencies
 node_modules/
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+server/venv/
+venv/
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Environment / Secrets
+.env
+.env.local
+.env.production
+
+# Build output
+admin-web/dist/
+
+# Uploaded images
+server/images/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+debug.log
+
+# Backup files
+*.bak
+
+# Screenshots
+*.png
+*.jpg
+!icons/*.png

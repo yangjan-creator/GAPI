@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Gemini 對話分類助手（含圖片攔截）",
-  "version": "2.0.0",
-  "description": "Gemini 對話分類管理助手，支援對話分類、自動記錄、圖片攔截、專案管理（EELL、羽球漫畫專案）等功能。",
+  "name": "Gemini 對話分類助手（龍蝦強化版）",
+  "version": "2.1.1",
+  "description": "自動記錄對話、三端發話適配、IndexedDB 持久化。",
   "permissions": [
     "storage",
     "unlimitedStorage",
@@ -13,31 +13,29 @@
   ],
   "host_permissions": [
     "https://gemini.google.com/*",
-    "https://*.googleusercontent.com/*",
-    "https://*.r2.cloudflarestorage.com/*",
-    "https://*.cloudflare.com/*"
+    "https://claude.ai/*",
+    "https://www.nebula.gg/*",
+    "http://127.0.0.1:18792/*"
   ],
-  "externally_connectable": {
-    "matches": [
-      "http://localhost/*",
-      "http://127.0.0.1/*"
-    ]
+  "action": {
+    "default_title": "開啟 Gemini 分類助手"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://gemini.google.com/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle",
-      "all_frames": false
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://claude.ai/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
     }
-  ],
-  "action": {
-    "default_title": "Gemini 對話分類助手"
-  },
-  "side_panel": {
-    "default_path": "sidepanel.html"
-  }
+  ]
 }

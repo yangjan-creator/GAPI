@@ -656,6 +656,10 @@
   let scrapeTimeout = null; // 延遲提取的定時器
   let imageCheckInterval = null; // 定期檢查圖片的定時器（新增）
   let forceExtractInterval = null; // 強制提取圖片的定時器（每 2 秒掃描一次）
+  // History API 和 popstate 清理用
+  let _originalPushState = null;
+  let _originalReplaceState = null;
+  let _popstateHandler = null;
   // 【持久化 Registry】廢除記憶體 Set，改用 chrome.storage.local 的 download_history 物件
   let processedImageUrls = new Set(); // 已處理的圖片 URL 集合（用於去重，僅在記憶體中，用於快速檢查）
   
@@ -997,6 +1001,23 @@
       console.log('[Gemini 分類助手] 頁面載入中，等待 DOMContentLoaded...');
       document.addEventListener('DOMContentLoaded', () => {
         console.log('[Gemini 分類助手] DOMContentLoaded 事件觸發');
+const SITE_ADAPTERS = {
+    "gemini": { 
+        input: "div[contenteditable=\"true\"]", 
+        send: "button[aria-label=\"Send message\"]",
+        scraper: ".message-content"
+    },
+    "claude": { 
+        input: "div[contenteditable=\"true\"]", 
+        send: "button[aria-label=\"Send Message\"]",
+        scraper: ".font-claude-message"
+    },
+    "nebula": { 
+        input: "textarea", 
+        send: "button.send-button",
+        scraper: ".message-text"
+    }
+};
         startMonitoring();
       });
     } else {
@@ -1004,8 +1025,66 @@
       startMonitoring();
     }
 
+    // 頁面卸載時自動清理資源，防止記憶體洩漏
+    window.addEventListener('beforeunload', () => {
+      if (typeof stopMonitoring === 'function') stopMonitoring();
+    });
+    window.addEventListener('pagehide', () => {
+      if (typeof stopMonitoring === 'function') stopMonitoring();
+    });
+
     // 監聽來自 Side Panel 的消息
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        const hostname = window.location.hostname;
+        const adapter = hostname.includes('claude.ai') ? SITE_ADAPTERS.claude : 
+                        (hostname.includes('nebula.gg') ? SITE_ADAPTERS.nebula : SITE_ADAPTERS.gemini);
+
+        if (message.action === 'GET_LAST_RESPONSE') {
+            const elements = document.querySelectorAll(adapter.scraper);
+            if (elements.length > 0) {
+                const rawElement = elements[elements.length - 1];
+                
+                // [LOBSTER_SANITY_SCRAPER] 整合 Voyager 的清洗邏輯
+                const clone = rawElement.cloneNode(true);
+                // 移除 UI 噪音與按鈕
+                clone.querySelectorAll('button, [role="button"], [aria-label], .thinking-toggle').forEach(n => n.remove());
+                
+                const cleanContent = clone.innerText.replace(/\s+/g, ' ').trim();
+                
+                // [Step 6] 持久化請求
+                chrome.runtime.sendMessage({
+                    action: 'PERSIST_RESPONSE',
+                    site: hostname,
+                    text: cleanContent,
+                    timestamp: Date.now()
+                });
+
+                sendResponse({ status: 'success', data: cleanContent });
+            } else {
+                sendResponse({ status: 'failed', reason: 'No AI response found' });
+            }
+            return true;
+        }
+
+        if (message.action === 'ACTION_SEND_MESSAGE') {
+            const inputField = document.querySelector(adapter.input);
+            const sendButton = document.querySelector(adapter.send);
+            if (inputField) {
+                inputField.focus();
+                document.execCommand('insertText', false, message.text);
+                setTimeout(() => {
+                    if (sendButton) {
+                        sendButton.click();
+                    } else {
+                        inputField.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                    }
+                }, 100);
+                sendResponse({ status: 'sent', site: hostname });
+            } else {
+                sendResponse({ status: 'failed', reason: `Selectors not found for ${hostname}` });
+            }
+            return true;
+        }
       // 只在非頻繁的消息時才記錄日誌（減少控制台噪音）
       if (message.action !== 'getUserProfile' && message.action !== 'GET_DOWNLOAD_BUTTONS' && message.action !== 'ping') {
         console.log('[Gemini 分類助手] 收到消息:', message);
@@ -1716,8 +1795,16 @@
   function stopMonitoring() {
     isMonitoring = false;
     console.log('[Gemini 分類助手] ✗ 停止監測');
-    
-    // 停止標題觀察器
+
+    // 使用 observerManager 統一清理所有受管理的觀察器
+    try {
+      observerManager.disconnectAll();
+      console.log('[Gemini 分類助手] [清理] observerManager 已清理所有觀察器');
+    } catch (e) {
+      console.log('[Gemini 分類助手] [清理] observerManager 清理時發生錯誤（可忽略）:', e.message);
+    }
+
+    // 停止標題觀察器（可能未通過 observerManager 管理）
     if (titleObserver) {
       try {
         titleObserver.disconnect();
@@ -1735,11 +1822,55 @@
       urlCheckInterval = null;
       console.log('[Gemini 分類助手] 已停止 URL 檢查定時器');
     }
-    
+
+    // 恢復 History API 原始方法
+    if (_originalPushState) {
+      history.pushState = _originalPushState;
+      _originalPushState = null;
+      console.log('[Gemini 分類助手] [清理] 已恢復 history.pushState');
+    }
+    if (_originalReplaceState) {
+      history.replaceState = _originalReplaceState;
+      _originalReplaceState = null;
+      console.log('[Gemini 分類助手] [清理] 已恢復 history.replaceState');
+    }
+
+    // 移除 popstate 事件監聽器
+    if (_popstateHandler) {
+      window.removeEventListener('popstate', _popstateHandler);
+      _popstateHandler = null;
+      console.log('[Gemini 分類助手] [清理] 已移除 popstate 監聽器');
+    }
+
+    // 恢復 fetch/XHR 原始方法（全局攔截器）
+    if (window._geminiInterceptors) {
+      if (window._geminiInterceptors.originalFetch) {
+        window.fetch = window._geminiInterceptors.originalFetch;
+        console.log('[Gemini 分類助手] [清理] 已恢復 window.fetch');
+      }
+      if (window._geminiInterceptors.originalXHROpen) {
+        XMLHttpRequest.prototype.open = window._geminiInterceptors.originalXHROpen;
+        console.log('[Gemini 分類助手] [清理] 已恢復 XMLHttpRequest.prototype.open');
+      }
+      if (window._geminiInterceptors.originalXHRSend) {
+        XMLHttpRequest.prototype.send = window._geminiInterceptors.originalXHRSend;
+        console.log('[Gemini 分類助手] [清理] 已恢復 XMLHttpRequest.prototype.send');
+      }
+      window._geminiInterceptors = null;
+    }
+
+    // 使用 eventManager 清理所有受管理的事件監聽器
+    try {
+      eventManager.cleanup();
+      console.log('[Gemini 分類助手] [清理] eventManager 已清理所有事件監聽器');
+    } catch (e) {
+      console.log('[Gemini 分類助手] [清理] eventManager 清理時發生錯誤（可忽略）:', e.message);
+    }
+
     // 重置狀態（但保留 currentChatId 和 currentTitle，以便重新啟動時使用）
     extractionAttempts = 0;
     lastNotifiedData = null;
-    
+
     // 停止消息觀察器
     if (messageObserver) {
       try {
@@ -1750,7 +1881,7 @@
       messageObserver = null;
       console.log('[Gemini 分類助手] 已停止消息觀察器');
     }
-    
+
     // 停止圖片觀察器（新增）
     if (imageObserver) {
       try {
@@ -1761,17 +1892,17 @@
       imageObserver = null;
       console.log('[Gemini 分類助手] 已停止圖片觀察器');
     }
-    
+
     // 停止圖片檢查定時器（新增）
     if (imageCheckInterval) {
       clearInterval(imageCheckInterval);
       imageCheckInterval = null;
       console.log('[Gemini 分類助手] 已停止圖片檢查定時器');
     }
-    
+
     // 停止強制提取定時器（新增）
     stopForceExtractInterval();
-    
+
     // 重置消息記錄狀態
     lastMessageCount = 0;
     lastImageCount = 0; // 重置圖片計數（新增）
@@ -1782,20 +1913,22 @@
   function setupURLMonitoring() {
     console.log('[Gemini 分類助手] 設置 URL 監聽...');
 
-    // 監聽 popstate 事件（瀏覽器前進/後退）
-    window.addEventListener('popstate', () => {
+    // 監聽 popstate 事件（瀏覽器前進/後退）- 使用具名函數以便清理
+    _popstateHandler = () => {
       console.log('[Gemini 分類助手] popstate 事件觸發');
       setTimeout(() => {
         checkURLAndExtractConversation();
       }, 300);
-    });
+    };
+    window.addEventListener('popstate', _popstateHandler);
 
     // 攔截 pushState 和 replaceState（SPA 路由變化）
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
+    // 保存原始方法到模組級變數，以便 stopMonitoring 時恢復
+    _originalPushState = history.pushState;
+    _originalReplaceState = history.replaceState;
 
     history.pushState = function(...args) {
-      originalPushState.apply(history, args);
+      _originalPushState.apply(history, args);
       console.log('[Gemini 分類助手] pushState 觸發，新 URL:', window.location.href);
       setTimeout(() => {
         checkURLAndExtractConversation();
@@ -1803,7 +1936,7 @@
     };
 
     history.replaceState = function(...args) {
-      originalReplaceState.apply(history, args);
+      _originalReplaceState.apply(history, args);
       console.log('[Gemini 分類助手] replaceState 觸發，新 URL:', window.location.href);
       setTimeout(() => {
         checkURLAndExtractConversation();
@@ -4815,6 +4948,73 @@
     return false;
   }
 
+  // 新回復含圖片時自動觸發下載（生圖才做）
+  function handleAutoDownloadForGeneratedImages(newMessages) {
+    try {
+      if (!Array.isArray(newMessages) || newMessages.length === 0) return;
+
+      const candidates = newMessages.filter(msg =>
+        msg &&
+        msg.role === 'model' &&
+        Array.isArray(msg.images) &&
+        msg.images.length > 0
+      );
+
+      if (candidates.length === 0) return;
+
+      const now = Date.now();
+      if (now - lastAutoImageClickAt < AUTO_IMAGE_CLICK_COOLDOWN) return;
+
+      let handled = false;
+      let handledMsg = null;
+      for (const msg of candidates) {
+        const msgKey = msg.hash || msg.id || `${msg.role}_${(msg.text || '').substring(0, 80)}_${(msg.text || '').length}`;
+        if (autoImageHandledMessages.has(msgKey)) continue;
+        autoImageHandledMessages.add(msgKey);
+        handled = true;
+        handledMsg = msg;
+        break;
+      }
+
+      if (!handled) return;
+
+      lastAutoImageClickAt = now;
+
+      // 確保監聽已啟動
+      if (!clickMonitorStarted) {
+        clickMonitorStarted = true;
+        firstUserClickAt = Date.now();
+        recordClickMonitorEvent('FIRST_USER_CLICK', {
+          clickTimestamp: firstUserClickAt,
+          source: 'auto_image_detected'
+        });
+      }
+
+      startGlobalDownloadMonitor();
+
+      recordClickMonitorEvent('AUTO_IMAGE_DETECTED', {
+        messageId: handledMsg?.id || null,
+        imageCount: handledMsg?.images?.length || 0,
+        previewText: (handledMsg?.text || '').substring(0, 120)
+      });
+
+      const result = clickBestDownloadButton();
+      if (result?.status === 'error') {
+        recordClickMonitorEvent('AUTO_IMAGE_CLICK_FAILED', {
+          error: result.error || 'unknown'
+        });
+      } else {
+        recordClickMonitorEvent('AUTO_IMAGE_CLICKED', {
+          messageId: handledMsg?.id || null
+        });
+      }
+    } catch (error) {
+      recordClickMonitorEvent('AUTO_IMAGE_DETECT_ERROR', {
+        error: error?.message || String(error)
+      });
+    }
+  }
+
   // 提取並保存對話消息（重命名為 scrapeMessages）
   function scrapeMessages() {
     // 即使沒有 currentChatId，也嘗試提取消息（可能可以從消息中推斷對話 ID）
@@ -5350,6 +5550,9 @@
           }
         });
 
+      // 【自動生圖判斷】若新回復含圖片，啟動自動點擊下載
+      handleAutoDownloadForGeneratedImages(newMessages);
+
         if (newMessages.length > 0) {
           console.log('[Gemini 分類助手] [對話提取] 發現', newMessages.length, '條新消息，準備保存 (chatId:', chatIdToUse, ')');
           
@@ -5381,22 +5584,134 @@
                 console.error('[Gemini 分類助手] [對話提取] 發送消息失敗:', chrome.runtime.lastError.message);
                 return;
               }
-              
+
               if (response && response.status === 'ok') {
                 console.log('[Gemini 分類助手] [對話提取] ✓ 新消息已保存');
               }
             });
+
+            // 【GAPI】同時發送符合 API_SPEC.md 格式的數據
+            try {
+              const gapiData = formatConversationForAPI(newMessages, chatIdToUse, currentTitle);
+              if (isRuntimeValid()) {
+                chrome.runtime.sendMessage({
+                  action: 'GAPI_conversation_data',
+                  data: gapiData
+                }).catch(() => {});
+              }
+            } catch (gapiError) {
+              console.warn('[Gemini 分類助手] [GAPI] 格式化失敗:', gapiError.message);
+            }
           }
         }
       }
 
       console.log('[Gemini 分類助手] [對話提取] ========== 提取完成 ==========');
-      return messages;
+
+      // 【GAPI】返回符合 API 格式的數據（用於直接調用）
+      const apiFormattedMessages = messages.map(msg => formatMessageForAPI(msg, chatIdToUse));
+      return apiFormattedMessages;
     } catch (error) {
       console.error('[Gemini 分類助手] [對話提取] ❌ 提取消息時發生錯誤:', error);
       console.error('[Gemini 分類助手] [對話提取] 錯誤堆疊:', error.stack);
       return [];
     }
+  }
+
+  // ========== GAPI 格式轉換函數 ==========
+  // 將對話消息陣列轉換為符合 API_SPEC.md 格式
+  function formatConversationForAPI(messages, conversationId, conversationTitle = null) {
+    if (!messages || !Array.isArray(messages)) {
+      return {
+        id: conversationId || null,
+        title: conversationTitle || null,
+        messages: [],
+        created_at: Date.now(),
+        updated_at: Date.now()
+      };
+    }
+
+    // 轉換每條消息為 API 格式
+    const formattedMessages = messages.map(msg => formatMessageForAPI(msg, conversationId));
+
+    // 找到最早的時間戳作為創建時間
+    const timestamps = formattedMessages.map(m => m.timestamp).filter(t => t > 0);
+    const created_at = timestamps.length > 0 ? Math.min(...timestamps) : Date.now();
+    const updated_at = timestamps.length > 0 ? Math.max(...timestamps) : Date.now();
+
+    return {
+      id: conversationId || null,
+      title: conversationTitle || null,
+      messages: formattedMessages,
+      created_at: created_at,
+      updated_at: updated_at
+    };
+  }
+
+  // 將單條消息轉換為符合 API_SPEC.md 格式
+  function formatMessageForAPI(rawMessage, conversationId) {
+    if (!rawMessage) {
+      return null;
+    }
+
+    // 處理附件（圖片）
+    let attachments = [];
+    if (rawMessage.images && Array.isArray(rawMessage.images)) {
+      attachments = rawMessage.images
+        .filter(img => img && img.url)
+        .map(img => {
+          // 如果有下載URL使用下載URL，否則使用原始URL
+          return img.downloadUrl || img.originalUrl || img.url;
+        });
+    }
+
+    // 構建符合 API_SPEC.md 格式的消息對象
+    const apiMessage = {
+      id: rawMessage.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9)),
+      conversation_id: conversationId || rawMessage.chatId || null,
+      role: normalizeRole(rawMessage.role),
+      content: rawMessage.text || rawMessage.content || '',
+      timestamp: rawMessage.timestamp || Date.now(),
+      metadata: {}
+    };
+
+    // 添加附件
+    if (attachments.length > 0) {
+      apiMessage.attachments = attachments;
+    }
+
+    // 添加元數據
+    if (rawMessage.extractedAt) {
+      apiMessage.metadata.extracted_at = rawMessage.extractedAt;
+    }
+
+    if (rawMessage.codeBlocks && rawMessage.codeBlocks.length > 0) {
+      apiMessage.metadata.code_blocks = rawMessage.codeBlocks.map(block => ({
+        type: block.type || 'code',
+        language: block.language || null,
+        text: block.text
+      }));
+    }
+
+    return apiMessage;
+  }
+
+  // 標準化角色名稱
+  function normalizeRole(role) {
+    if (!role) return 'user';
+
+    const roleMap = {
+      'user': 'user',
+      'human': 'user',
+      'model': 'model',
+      'assistant': 'model',
+      'ai': 'model',
+      'gemini': 'model',
+      'system': 'system'
+    };
+
+    const normalizedRole = role.toLowerCase().trim();
+    return roleMap[normalizedRole] || 'user';
   }
 
   // 保留舊函數名作為別名（向後兼容）

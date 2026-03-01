@@ -1,5 +1,9 @@
 /* Minimal Gemini-like admin UI (no external deps) */
 
+@import './components/DashboardLayout.css';
+@import './components/SimpleSearch.css';
+@import './components/LogView.css';
+
 :root {
   color-scheme: light;
   --bg: #0b1220;

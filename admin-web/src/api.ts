@@ -153,7 +153,13 @@ export class ExtensionApi {
       throw new Error('chrome.runtime.connect 不可用（需要 background.js 的 onConnectExternal）');
     }
     const port = chromeObj.runtime.connect(this.extensionId, { name: 'gemini-admin' });
-    port.onMessage.addListener((msg: any) => onEvent(msg));
+    port.onMessage.addListener((msg: any) => {
+      try {
+        onEvent(msg);
+      } catch (e) {
+        console.error('[GAPI Admin] Event handler error:', e);
+      }
+    });
     port.onDisconnect.addListener(() => onEvent({ type: 'disconnected' }));
     try {
       port.postMessage({ type: 'ping' });

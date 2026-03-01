@@ -1,0 +1,36 @@
+{
+  "claude": {
+    "input_area": [
+      "textarea[placeholder*='Send a message to Claude']",
+      "div[contenteditable='true'][role='textbox']",
+      "div[data-testid='input-composer']"
+    ],
+    "send_button": [
+      "button[aria-label='Send message']",
+      "button[data-testid='send-button']",
+      "button[type='submit']"
+    ],
+    "response_container": [
+      "div[data-testid='chat-message-list']",
+      "div[role='log']",
+      "div[class*='message-container']"
+    ]
+  },
+  "gemini": {
+    "input_area": [
+      "textarea[placeholder*='Enter prompt here']",
+      "div[contenteditable='true'][aria-label='Gemini Chat Input']",
+      "div[data-testid='prompt-input']"
+    ],
+    "send_button": [
+      "button[aria-label*='Send message']",
+      "button[aria-label*='Send']",
+      "button[type='submit']"
+    ],
+    "response_container": [
+      "div[data-testid='chat-window']",
+      "div[role='log']",
+      "div[class*='message-list']"
+    ]
+  }
+}

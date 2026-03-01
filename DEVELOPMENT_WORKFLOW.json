@@ -1,0 +1,14 @@
+{
+  "project": "GEMINISIDE_2.0",
+  "workflow_version": "1.3",
+  "active_skills": ["claude-code-bridge.md", "disperse-subgoals.md", "think-ground-verify.md"],
+  "deterministic_steps": [
+    { "step_id": 1, "task": "Permission_Update", "status": "COMPLETED" },
+    { "step_id": 2, "task": "Site_Selector_Injection", "status": "COMPLETED" },
+    { "step_id": 3, "task": "Nebula_Selector_Implementation", "status": "COMPLETED" },
+    { "step_id": 4, "task": "Physical_Message_Logic", "status": "COMPLETED" },
+    { "step_id": 5, "task": "Response_Scraper_Implementation", "status": "COMPLETED" },
+    { "step_id": 6, "task": "IndexedDB_Persistence", "status": "COMPLETED" },
+    { "step_id": 7, "task": "FastAPI_MCP_Backend", "status": "COMPLETED" }
+  ]
+}

@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/components/DashboardLayout.tsx","./src/components/LogView.tsx","./src/components/SimpleSearch.tsx"],"version":"5.9.3"}

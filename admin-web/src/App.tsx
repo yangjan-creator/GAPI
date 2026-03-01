@@ -1,6 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatMessage, ConversationMeta, UserProfile } from './api';
 import { ExtensionApi } from './api';
+import { DashboardLayout } from './components/DashboardLayout';
+import { SimpleSearch } from './components/SimpleSearch';
+import { LogView } from './components/LogView';
 
 const LS_KEY_EXTENSION_ID = 'gemini_admin_extension_id';
 
@@ -24,15 +27,6 @@ function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
 }
 
-function escapeHtml(s: string) {
-  return s
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
 function MessageBubble({ msg }: { msg: ChatMessage }) {
   const role = msg.role || 'unknown';
   const isUser = role === 'user';
@@ -45,7 +39,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
           <span className="msgRole">{isUser ? '你' : isAssistant ? 'Gemini' : role}</span>
           <span className="msgTime">{formatTime(msg.timestamp)}</span>
         </div>
-        <div className="msgText" dangerouslySetInnerHTML={{ __html: escapeHtml(msg.text || '') }} />
+        <div className="msgText">{msg.text || ''}</div>
 
         {Array.isArray(msg.codeBlocks) && msg.codeBlocks.length > 0 && (
           <div className="codeBlocks">
@@ -134,7 +128,7 @@ export function App() {
   const refreshTimerRef = useRef<number | null>(null);
   const lastRefreshRef = useRef<number>(0);
 
-  async function connectAndLoad() {
+  const connectAndLoad = useCallback(async () => {
     if (!api) {
       setError('請先輸入 extensionId');
       return;
@@ -146,7 +140,7 @@ export function App() {
       if (!resp?.success) throw new Error(resp?.error || 'listProfiles failed');
       const ps = resp.profiles?.length ? resp.profiles : ['default'];
       setProfiles(ps);
-      if (!ps.includes(selectedProfile)) setSelectedProfile(ps[0] || 'default');
+      setSelectedProfile((prev) => (ps.includes(prev) ? prev : (ps[0] || 'default')));
       setStatus('已連線');
 
       try {
@@ -167,9 +161,42 @@ export function App() {
       setStatus('未連線');
       setError(e?.message || String(e));
     }
-  }
+  }, [api]);
 
-  function scheduleRefresh(kind: 'conversations' | 'messages' | 'tabs' | 'all') {
+  const loadConversations = useCallback(async (profile: string) => {
+    if (!api) return;
+    setError(null);
+    try {
+      const resp = await api.listConversations(profile);
+      if (!resp?.success) throw new Error(resp?.error || 'listConversations failed');
+      setConversations(resp.conversations || []);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    }
+  }, [api]);
+
+  const loadMessages = useCallback(async (profile: string, chatId: string) => {
+    if (!api) return;
+    setLoadingMessages(true);
+    setError(null);
+    try {
+      const resp = await api.getConversationMessages(profile, chatId);
+      if (!resp?.success) throw new Error(resp?.error || 'getConversationMessages failed');
+      setMessages(resp.messages || []);
+      // scroll to bottom
+      requestAnimationFrame(() => {
+        const el = listRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    } catch (e: any) {
+      setError(e?.message || String(e));
+      setMessages([]);
+    } finally {
+      setLoadingMessages(false);
+    }
+  }, [api]);
+
+  const scheduleRefresh = useCallback((kind: 'conversations' | 'messages' | 'tabs' | 'all') => {
     // debounce to avoid storm
     const now = Date.now();
     if (now - lastRefreshRef.current < 250) return;
@@ -189,40 +216,7 @@ export function App() {
         }
       }
     }, 180);
-  }
-
-  async function loadConversations(profile: string) {
-    if (!api) return;
-    setError(null);
-    try {
-      const resp = await api.listConversations(profile);
-      if (!resp?.success) throw new Error(resp?.error || 'listConversations failed');
-      setConversations(resp.conversations || []);
-    } catch (e: any) {
-      setError(e?.message || String(e));
-    }
-  }
-
-  async function loadMessages(profile: string, chatId: string) {
-    if (!api) return;
-    setLoadingMessages(true);
-    setError(null);
-    try {
-      const resp = await api.getConversationMessages(profile, chatId);
-      if (!resp?.success) throw new Error(resp?.error || 'getConversationMessages failed');
-      setMessages(resp.messages || []);
-      // scroll to bottom
-      requestAnimationFrame(() => {
-        const el = listRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-      });
-    } catch (e: any) {
-      setError(e?.message || String(e));
-      setMessages([]);
-    } finally {
-      setLoadingMessages(false);
-    }
-  }
+  }, [api, selectedProfile, selectedChatId, loadConversations, loadMessages]);
 
   async function sendMessage() {
     if (!api) return;
@@ -259,22 +253,27 @@ export function App() {
         if (!begin?.success || !begin.uploadId) throw new Error(begin?.error || 'uploadBegin failed');
 
         const uploadId = begin.uploadId;
-        const chunkSize = 180_000; // keep well under message limits
-        for (let i = 0; i < b64.length; i += chunkSize) {
-          const chunk = b64.slice(i, i + chunkSize);
-          const r = await api.uploadChunk(uploadId, chunk);
-          if (!r?.success) {
+        let uploadCompleted = false;
+        try {
+          const chunkSize = 180_000; // keep well under message limits
+          for (let i = 0; i < b64.length; i += chunkSize) {
+            const chunk = b64.slice(i, i + chunkSize);
+            const r = await api.uploadChunk(uploadId, chunk);
+            if (!r?.success) throw new Error(r?.error || 'uploadChunk failed');
+          }
+
+          const commit = await api.uploadCommit(uploadId, text);
+          if (!commit?.success) throw new Error(commit?.error || 'uploadCommit failed');
+          uploadCompleted = true;
+        } finally {
+          if (!uploadCompleted) {
             try {
               await api.uploadAbort(uploadId);
             } catch {
-              // ignore
+              // ignore abort errors
             }
-            throw new Error(r?.error || 'uploadChunk failed');
           }
         }
-
-        const commit = await api.uploadCommit(uploadId, text);
-        if (!commit?.success) throw new Error(commit?.error || 'uploadCommit failed');
       } else {
         const resp = await api.sendMessageToChat(selectedProfile, selectedChatId, text);
         if (!resp?.success) throw new Error(resp?.error || 'sendMessage failed');
@@ -325,8 +324,7 @@ export function App() {
   useEffect(() => {
     // try auto connect
     if (api) connectAndLoad();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api]);
+  }, [api, connectAndLoad]);
 
   // realtime push connection
   useEffect(() => {
@@ -397,8 +395,7 @@ export function App() {
       }
       portRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, selectedProfile, selectedChatId]);
+  }, [api, selectedProfile, selectedChatId, scheduleRefresh]);
 
   // polling fallback when push is not active
   useEffect(() => {
@@ -411,20 +408,17 @@ export function App() {
     }, 3500);
 
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, pushActive, selectedProfile, selectedChatId]);
+  }, [api, pushActive, selectedProfile, selectedChatId, loadConversations, loadMessages]);
 
   useEffect(() => {
     if (!api) return;
     loadConversations(selectedProfile);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, selectedProfile]);
+  }, [api, selectedProfile, loadConversations]);
 
   useEffect(() => {
     if (!api) return;
     if (selectedChatId) loadMessages(selectedProfile, selectedChatId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, selectedProfile, selectedChatId]);
+  }, [api, selectedProfile, selectedChatId, loadMessages]);
 
   const filteredConversations = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -439,76 +433,104 @@ export function App() {
 
   const pushLabel = pushActive ? '即時' : '輪詢';
 
+  // Prepare logs for LogView component
+  const logs = useMemo(() => {
+    const result = [];
+    if (error) {
+      result.push({ timestamp: Date.now(), level: 'ERROR', message: error });
+    }
+    if (status) {
+      result.push({ timestamp: Date.now(), level: 'INFO', message: `狀態: ${status}` });
+    }
+    if (pushLabel) {
+      result.push({ timestamp: Date.now(), level: 'INFO', message: `連線模式: ${pushLabel}` });
+    }
+    return result;
+  }, [error, status, pushLabel]);
+
   return (
-    <div className="appShell">
-      <header className="topBar">
-        <div className="brand">
-          <div className="brandTitle">Gemini</div>
-          <div className="brandSub">Conversations</div>
-        </div>
-        <div className="connect">
-          {(settingsOpen || status !== '已連線') && (
-            <>
-              <input
-                className="input"
-                value={extensionId}
-                onChange={(e) => setExtensionId(e.target.value.trim())}
-                placeholder="Extension ID"
-              />
-              <button className="btn" onClick={connectAndLoad} disabled={!extensionId}>
-                連線
-              </button>
-              <input
-                className="input"
-                value={downloadBaseFolder}
-                onChange={(e) => setDownloadBaseFolder(e.target.value)}
-                placeholder="下載子資料夾 (Downloads 下)"
-                title="只能指定 Downloads 底下的相對路徑，例如 Gemini_Assistant 或 Gemini_Assistant/MyProject"
-              />
-              <button
-                className="btn"
-                onClick={async () => {
-                  if (!api) return;
-                  setSavingSettings(true);
-                  setError(null);
-                  try {
-                    const r = await api.setDownloadBaseFolder(downloadBaseFolder);
-                    if (!r?.success) throw new Error(r?.error || 'setDownloadBaseFolder failed');
-                    setDownloadBaseFolder(r.downloadBaseFolder);
-                  } catch (e: any) {
-                    setError(e?.message || String(e));
-                  } finally {
-                    setSavingSettings(false);
-                  }
-                }}
-                disabled={!api || savingSettings}
-                title="儲存下載位置設定"
-              >
-                {savingSettings ? '儲存中…' : '儲存下載位置'}
-              </button>
-            </>
+    <DashboardLayout title="GAPI 管理儀表板" subtitle="監控與管理 Gemini 對話服務">
+      <div className="dashboard-grid">
+        <div className="dashboard-section">
+          <div className="section-header">
+            <h2>連線設定</h2>
+            <button
+              className="btn-icon"
+              onClick={() => setSettingsOpen((v) => !v)}
+              title={settingsOpen ? '關閉設定' : '設定'}
+            >
+              {settingsOpen ? '隱藏' : '顯示設定'}
+            </button>
+          </div>
+          
+          {settingsOpen && (
+            <div className="settings-panel">
+              <div className="form-row">
+                <label>Extension ID</label>
+                <input
+                  className="input"
+                  value={extensionId}
+                  onChange={(e) => setExtensionId(e.target.value.trim())}
+                  placeholder="Extension ID"
+                />
+                <button className="btn" onClick={connectAndLoad} disabled={!extensionId}>
+                  連線
+                </button>
+              </div>
+              
+              <div className="form-row">
+                <label>下載資料夾</label>
+                <input
+                  className="input"
+                  value={downloadBaseFolder}
+                  onChange={(e) => setDownloadBaseFolder(e.target.value)}
+                  placeholder="下載子資料夾 (Downloads 下)"
+                  title="只能指定 Downloads 底下的相對路徑"
+                />
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    if (!api) return;
+                    setSavingSettings(true);
+                    setError(null);
+                    try {
+                      const r = await api.setDownloadBaseFolder(downloadBaseFolder);
+                      if (!r?.success) throw new Error(r?.error || 'setDownloadBaseFolder failed');
+                      setDownloadBaseFolder(r.downloadBaseFolder);
+                    } catch (e: any) {
+                      setError(e?.message || String(e));
+                    } finally {
+                      setSavingSettings(false);
+                    }
+                  }}
+                  disabled={!api || savingSettings}
+                  title="儲存下載位置設定"
+                >
+                  {savingSettings ? '儲存中…' : '儲存'}
+                </button>
+              </div>
+            </div>
           )}
-          <div className={classNames('statusPill', status === '已連線' && 'ok', status !== '已連線' && 'warn')}>{status}</div>
-          <div className={classNames('statusPill', pushActive ? 'ok' : 'warn')}>{pushLabel}</div>
-          <button
-            className="btnIcon"
-            onClick={() => setSettingsOpen((v) => !v)}
-            title={settingsOpen ? '關閉設定' : '設定'}
-          >
-            設定
-          </button>
+          
+          <div className="status-bar">
+            <div className={classNames('status-pill', status === '已連線' && 'ok', status !== '已連線' && 'warn')}>
+              {status}
+            </div>
+            <div className={classNames('status-pill', pushActive ? 'ok' : 'warn')}>
+              {pushLabel}
+            </div>
+          </div>
         </div>
-      </header>
 
       <div className="mainGrid">
-        <aside className="sidebar">
-          <div className="panelHeader">
-            <div className="panelTitle">對話</div>
+        <div className="dashboard-section">
+          <div className="section-header">
+            <h2>對話列表</h2>
           </div>
-
-          <div className="panelBody">
-            <div className="row">
-              <label className="label">用戶</label>
+          
+          <div className="panel-controls">
+            <div className="form-row">
+              <label>用戶</label>
               <select
                 className="select"
                 value={selectedProfile}
@@ -522,229 +544,163 @@ export function App() {
                 ))}
               </select>
             </div>
-
-            <div className="openTabs">
-              <div className="openTabsHeader">
-                <button className="openTabsTitleBtn" onClick={() => setOpenTabsExpanded((v) => !v)} title="展開/收起">
-                  已開啟 Gemini 分頁
-                  <span className={classNames('chev', openTabsExpanded && 'chevOpen')}>▶</span>
-                </button>
-                <div className="openTabsRight">
-                  <button
-                    className="btnSmall"
-                    onClick={async () => {
-                      if (!api) return;
-                      const t = await api.listOpenTabs();
-                      if (t?.success) setOpenTabs(t.tabs || []);
-                    }}
-                    disabled={!api}
-                    title="刷新"
-                  >
-                    刷新
-                  </button>
-                </div>
-              </div>
-              <div className={classNames('openTabsList', !openTabsExpanded && 'openTabsListHidden')}>
-                {openTabs.length === 0 ? (
-                  <div className="openTabsEmpty">目前沒有偵測到 Gemini 分頁</div>
-                ) : (
-                  openTabs.slice(0, 6).map((t, idx) => {
-                    const p = t?.ping?.userProfile || t?.derivedUserProfile || 'default';
-                    const cid = t?.ping?.chatId || t?.derivedChatId || '';
-                    const title = t?.ping?.title || '';
-                    return (
-                      <div key={String(t.tabId || idx)} className="openTabItem">
-                        <div className="openTabTop">
-                          <span className="mono">{p}</span>
-                          <span className="dot">•</span>
-                          <span className="mono">{cid || '-'}</span>
-                        </div>
-                        <div className="openTabTitle">{title || '（未取得標題）'}</div>
-                        <div className="openTabActions">
-                          <button
-                            className="btnTiny"
-                            onClick={async () => {
-                              if (!api) return;
-                              if (p && cid) {
-                                setSelectedProfile(p);
-                                setSelectedChatId(String(cid));
-                              }
-                            }}
-                            title="在後台切換到此對話"
-                          >
-                            切換
-                          </button>
-                          <button
-                            className="btnTiny"
-                            onClick={async () => {
-                              if (!api) return;
-                              if (typeof t.tabId === 'number') await api.focusTab(t.tabId);
-                            }}
-                            title="切到該分頁"
-                          >
-                            前往
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-
-            <div className="row">
-              <input className="input" placeholder="搜尋標題 / chatId" value={search} onChange={(e) => setSearch(e.target.value)} />
-            </div>
-
-            <div className="convList">
-              {filteredConversations.length === 0 ? (
-                <div className="empty">尚無對話（先打開 Gemini 讓擴充功能開始記錄）</div>
-              ) : (
-                filteredConversations.map((c) => (
-                  <button
-                    key={c.chatId}
-                    className={classNames('convItem', c.chatId === selectedChatId && 'active')}
-                    onClick={() => {
-                      setSelectedChatId(c.chatId);
-                      const key = `${selectedProfile}:${c.chatId}`;
-                      setUnread((m) => {
-                        if (!m[key]) return m;
-                        const { [key]: _, ...rest } = m;
-                        return rest;
-                      });
-                    }}
-                  >
-                    <div className="convTitle">{c.title || '未命名對話'}</div>
-                    <div className="convMeta">
-                      <span className="mono">{c.chatId}</span>
-                      {unread[`${selectedProfile}:${c.chatId}`] ? (
-                        <>
-                          <span className="dot">•</span>
-                          <span className="badge">{unread[`${selectedProfile}:${c.chatId}`]}</span>
-                        </>
-                      ) : null}
-                      <span className="dot">•</span>
-                      <span>{c.lastUpdated ? formatTime(c.lastUpdated) : ''}</span>
-                    </div>
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-        </aside>
-
-        <section className="chatPanel">
-          <div className="chatHeader">
-            <div className="chatTitle">{selectedConversation ? selectedConversation.title : '選擇一個對話'}</div>
-            <div className="chatSub">
-              <span className="mono">{selectedChatId || ''}</span>
-              {selectedConversation?.url ? (
-                <>
-                  <span className="dot">•</span>
-                  <a className="link" href={selectedConversation.url} target="_blank" rel="noreferrer">
-                    Gemini
-                  </a>
-                </>
-              ) : null}
-              {loadingMessages ? (
-                <>
-                  <span className="dot">•</span>
-                  <span>載入中…</span>
-                </>
-              ) : null}
-            </div>
+            
+            <SimpleSearch 
+              value={search} 
+              onChange={setSearch} 
+              placeholder="搜尋標題 / chatId" 
+            />
           </div>
 
-          <div className="chatBody" ref={listRef}>
-            {!selectedChatId ? (
-              <div className="emptyChat">在左側選擇一個對話</div>
-            ) : messages.length === 0 ? (
-              <div className="emptyChat">此對話尚無已保存消息（請在 Gemini 中產生/刷新一下）</div>
+          <div className="conv-list">
+            {filteredConversations.length === 0 ? (
+              <div className="empty">尚無對話（先打開 Gemini 讓擴充功能開始記錄）</div>
             ) : (
-              messages.map((m, idx) => <MessageBubble key={m.hash || m.id || String(idx)} msg={m} />)
+              filteredConversations.map((c) => (
+                <div
+                  key={c.chatId}
+                  className={classNames('conv-item', c.chatId === selectedChatId && 'active')}
+                  onClick={() => {
+                    setSelectedChatId(c.chatId);
+                    const key = `${selectedProfile}:${c.chatId}`;
+                    setUnread((m) => {
+                      if (!m[key]) return m;
+                      const { [key]: _, ...rest } = m;
+                      return rest;
+                    });
+                  }}
+                >
+                  <div className="conv-title">{c.title || '未命名對話'}</div>
+                  <div className="conv-meta">
+                    <span className="mono">{c.chatId}</span>
+                    {unread[`${selectedProfile}:${c.chatId}`] ? (
+                      <>
+                        <span className="dot">•</span>
+                        <span className="badge">{unread[`${selectedProfile}:${c.chatId}`]}</span>
+                      </>
+                    ) : null}
+                    <span className="dot">•</span>
+                    <span>{c.lastUpdated ? formatTime(c.lastUpdated) : ''}</span>
+                  </div>
+                </div>
+              ))
             )}
-
-            {selectedChatId && sending ? (
-              <div className="msgRow msgRowAssistant">
-                <div className="typingBubble" aria-label="typing">
-                  <span className="dot1" />
-                  <span className="dot2" />
-                  <span className="dot3" />
-                </div>
-              </div>
-            ) : null}
           </div>
+        </div>
 
-          <div className="chatComposer">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const f = e.target.files?.[0] || null;
-                setImageFile(f);
-                if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
-                setImagePreviewUrl(f ? URL.createObjectURL(f) : null);
-              }}
-            />
-            <textarea
-              className="textarea"
-              placeholder={selectedChatId ? '輸入訊息…（會真正送到 Gemini）' : '先選擇一個對話'}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  if (!sending && (draft.trim() || imageFile)) sendMessage();
-                }
-              }}
-              disabled={!selectedChatId || sending}
-              rows={3}
-            />
-            <div className="composerRight">
-              {imagePreviewUrl ? (
-                <div className="attachPreview" title={imageFile?.name || 'image'}>
-                  <img src={imagePreviewUrl} alt="attach" />
-                  <button
-                    className="btnRemove"
-                    onClick={() => {
-                      setImageFile(null);
-                      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
-                      setImagePreviewUrl(null);
-                      if (fileInputRef.current) fileInputRef.current.value = '';
-                    }}
-                    title="移除"
-                  >
-                    ×
-                  </button>
-                </div>
+        <div className="dashboard-section">
+          <div className="section-header">
+            <h2>對話內容</h2>
+          </div>
+          
+          <div className="chat-container">
+            <div className="chat-header">
+              <div className="chat-title">{selectedConversation ? selectedConversation.title : '選擇一個對話'}</div>
+              <div className="chat-sub">
+                <span className="mono">{selectedChatId || ''}</span>
+                {selectedConversation?.url ? (
+                  <>
+                    <span className="dot">•</span>
+                    <a className="link" href={selectedConversation.url} target="_blank" rel="noreferrer">
+                      Gemini
+                    </a>
+                  </>
+                ) : null}
+                {loadingMessages ? (
+                  <>
+                    <span className="dot">•</span>
+                    <span>載入中…</span>
+                  </>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="chat-body" ref={listRef}>
+              {!selectedChatId ? (
+                <div className="empty-chat">在左側選擇一個對話</div>
+              ) : messages.length === 0 ? (
+                <div className="empty-chat">此對話尚無已保存消息（請在 Gemini 中產生/刷新一下）</div>
               ) : (
+                messages.map((m, idx) => <MessageBubble key={m.hash || m.id || String(idx)} msg={m} />)
+              )}
+
+              {selectedChatId && sending ? (
+                <div className="msg-row msg-row-assistant">
+                  <div className="typing-bubble" aria-label="typing">
+                    <span className="dot1" />
+                    <span className="dot2" />
+                    <span className="dot3" />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="chat-composer">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] || null;
+                  setImageFile(f);
+                  if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+                  setImagePreviewUrl(f ? URL.createObjectURL(f) : null);
+                }}
+              />
+              <div className="composer-row">
                 <button
-                  className="btnAttach"
+                  className="btn-attach"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={!selectedChatId || sending}
                   title="上傳圖片"
                 >
-                  上傳
+                  上傳圖片
                 </button>
-              )}
-
-              <button className="btnPrimary" onClick={sendMessage} disabled={!selectedChatId || sending || (!draft.trim() && !imageFile)}>
-                {sending ? '送出中…' : '送出'}
-              </button>
+                
+                <div style={{ flex: 1 }}>
+                  {imagePreviewUrl ? (
+                    <div style={{ marginBottom: '8px' }}>
+                      <img 
+                        src={imagePreviewUrl} 
+                        alt="Preview" 
+                        style={{ maxHeight: '100px', maxWidth: '100px', display: 'block' }} 
+                      />
+                    </div>
+                  ) : null}
+                  <textarea
+                    className="textarea"
+                    placeholder={selectedChatId ? '輸入訊息…（會真正送到 Gemini）' : '先選擇一個對話'}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        if (!sending && (draft.trim() || imageFile)) sendMessage();
+                      }
+                    }}
+                    disabled={!selectedChatId || sending}
+                    rows={3}
+                  />
+                </div>
+                
+                <button className="btn-primary" onClick={sendMessage} disabled={!selectedChatId || sending || (!draft.trim() && !imageFile)}>
+                  {sending ? '送出中…' : '送出'}
+                </button>
+              </div>
             </div>
           </div>
-        </section>
+        </div>
       </div>
 
-      {error ? (
-        <div className="toastError">
-          <div className="toastTitle">錯誤</div>
-          <div className="toastMsg">{error}</div>
+        <div className="dashboard-section">
+          <div className="section-header">
+            <h2>系統日誌</h2>
+          </div>
+          <LogView logs={logs} />
         </div>
-      ) : null}
-    </div>
+      </div>
+    </DashboardLayout>
   );
 }
 

@@ -1,0 +1,28 @@
+{
+  "manifest_version": 2,
+  "name": "AI Chat Bridge",
+  "version": "0.1.0",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "storage",
+    "nativeMessaging",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["background/background.js"],
+    "persistent": false
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["content/claude.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": ["content/gemini.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

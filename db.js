@@ -4,10 +4,11 @@
 
 (function initGeminiLocalDB() {
   const DB_NAME = 'gemini_assistant_local_db';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2; // [P1.3] Incremented for message_results store
 
   const STORE_CONVERSATIONS = 'conversations';
   const STORE_MESSAGES = 'messages';
+  const STORE_MESSAGE_RESULTS = 'message_results'; // [P1.3] New store for sent message results
 
   /** @type {Promise<IDBDatabase> | null} */
   let dbPromise = null;
@@ -95,6 +96,13 @@
           store.createIndex('byUserProfile', 'userProfile', { unique: false });
           store.createIndex('byChatId', 'chatId', { unique: false });
           store.createIndex('byTimestamp', 'timestamp', { unique: false });
+        }
+        // [P1.3] Create message_results store
+        if (!db.objectStoreNames.contains(STORE_MESSAGE_RESULTS)) {
+          const store = db.createObjectStore(STORE_MESSAGE_RESULTS, { keyPath: 'id' });
+          store.createIndex('byConversationId', 'conversation_id', { unique: false });
+          store.createIndex('byTimestamp', 'timestamp', { unique: false });
+          store.createIndex('byStatus', 'status', { unique: false });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -245,6 +253,16 @@
     return Array.from(profiles.values()).sort();
   }
 
+  // [P1.3] Save message send result
+  async function saveMessageResult(record) {
+    const db = await openDB();
+    const tx = db.transaction([STORE_MESSAGE_RESULTS], 'readwrite');
+    const store = tx.objectStore(STORE_MESSAGE_RESULTS);
+    store.put(record);
+    await txDone(tx);
+    return record;
+  }
+
   // Expose API on globalThis for background.js
   // (MV3 service worker global is `self`)
   self.GeminiLocalDB = {
@@ -255,6 +273,10 @@
     listConversations,
     getConversationMeta,
     listProfiles,
+    // [P1.3] New methods
+    getDB: openDB,
+    saveMessageResult,
+    STORE_MESSAGE_RESULTS,
   };
 })();
 

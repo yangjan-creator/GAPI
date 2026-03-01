@@ -13,6 +13,717 @@ importScripts('r2.js');
 // Keep service worker alive while admin page is open via Port.
 const adminPorts = new Set();
 
+// ========== GAPI Server WebSocket Connection (P0.2) ==========
+// WebSocket client for authenticated communication with GAPI Server
+
+const GAPI_WS_URL = 'ws://localhost:18799/ws';
+const GAPI_HTTP_URL = 'http://localhost:18799';
+const RECONNECT_INTERVAL = 5000; // 5 seconds
+const PING_INTERVAL = 30000; // 30 seconds
+
+// ========== Token Manager ==========
+// Manages authentication tokens obtained from the GAPI server.
+// Caches tokens in chrome.storage.local and auto-refreshes before expiry.
+
+class TokenManager {
+  constructor(serverUrl) {
+    this.serverUrl = serverUrl;
+    this.token = null;
+    this.expiresAt = 0;
+    this.refreshTimer = null;
+  }
+
+  async getToken(extensionId) {
+    // Return cached token if still valid (with 5-min buffer)
+    if (this.token && Date.now() < this.expiresAt - 300000) {
+      return this.token;
+    }
+
+    // Try to load from storage
+    try {
+      const stored = await chrome.storage.local.get(['gapi_token', 'gapi_token_expires']);
+      if (stored.gapi_token && Date.now() < (stored.gapi_token_expires || 0) - 300000) {
+        this.token = stored.gapi_token;
+        this.expiresAt = stored.gapi_token_expires;
+        this.scheduleRefresh(extensionId);
+        return this.token;
+      }
+    } catch (e) {
+      console.warn('[TokenManager] Storage read failed:', e);
+    }
+
+    // Fetch new token from server
+    return this.refreshToken(extensionId);
+  }
+
+  async refreshToken(extensionId) {
+    try {
+      const resp = await fetch(`${this.serverUrl}/v1/auth/token?extension_id=${encodeURIComponent(extensionId)}`, {
+        method: 'POST'
+      });
+      if (!resp.ok) throw new Error(`Token request failed: ${resp.status}`);
+      const data = await resp.json();
+
+      this.token = data.token;
+      this.expiresAt = data.expires_at;
+
+      // Cache in storage
+      try {
+        await chrome.storage.local.set({
+          gapi_token: this.token,
+          gapi_token_expires: this.expiresAt
+        });
+      } catch (e) {
+        console.warn('[TokenManager] Storage write failed:', e);
+      }
+
+      this.scheduleRefresh(extensionId);
+      return this.token;
+    } catch (e) {
+      console.error('[TokenManager] Failed to get token:', e);
+      return this.token; // Return stale token as fallback
+    }
+  }
+
+  scheduleRefresh(extensionId) {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    const delay = Math.max(0, this.expiresAt - Date.now() - 300000);
+    if (delay > 0) {
+      this.refreshTimer = setTimeout(() => this.refreshToken(extensionId), delay);
+    }
+  }
+
+  invalidate() {
+    this.token = null;
+    this.expiresAt = 0;
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    try {
+      chrome.storage.local.remove(['gapi_token', 'gapi_token_expires']);
+    } catch (e) {}
+  }
+}
+
+// 全域 TokenManager 實例
+const tokenManager = new TokenManager(GAPI_HTTP_URL);
+
+class GAPIWebSocketClient {
+  constructor() {
+    this.ws = null;
+    this.sessionId = null;
+    this.extensionId = null;
+    this.authenticated = false;
+    this.reconnectTimer = null;
+    this.pingTimer = null;
+    this.messageHandlers = new Map();
+    this.pendingRequests = new Map();
+  }
+
+  // 生成認證 Token (透過 TokenManager 從 server 取得)
+  async generateToken(extensionId) {
+    return tokenManager.getToken(extensionId);
+  }
+
+  // 連接到 GAPI Server
+  async connect(extensionId) {
+    this.extensionId = extensionId;
+    
+    return new Promise((resolve, reject) => {
+      try {
+        console.log(`[GAPI-WS] Connecting to ${GAPI_WS_URL}/${extensionId}...`);
+        this.ws = new WebSocket(`${GAPI_WS_URL}/${extensionId}`);
+
+        this.ws.onopen = () => {
+          console.log('[GAPI-WS] Connection opened, sending auth...');
+          // 發送認證訊息
+          this.generateToken(extensionId).then(token => {
+            this.send({
+              type: 'auth',
+              payload: { token }
+            });
+          });
+        };
+
+        this.ws.onmessage = (event) => {
+          this.handleMessage(event.data);
+        };
+
+        this.ws.onerror = (error) => {
+          console.error('[GAPI-WS] Error:', error);
+        };
+
+        this.ws.onclose = () => {
+          console.log('[GAPI-WS] Connection closed');
+          this.authenticated = false;
+          this.scheduleReconnect();
+        };
+
+        // 等待認證結果
+        this.pendingRequests.set('auth', { resolve, reject });
+        
+        // 設置超時
+        setTimeout(() => {
+          if (this.pendingRequests.has('auth')) {
+            this.pendingRequests.delete('auth');
+            reject(new Error('Auth timeout'));
+          }
+        }, 10000);
+
+      } catch (error) {
+        console.error('[GAPI-WS] Connection error:', error);
+        reject(error);
+      }
+    });
+  }
+
+  // 處理收到的訊息
+  handleMessage(data) {
+    try {
+      const msg = JSON.parse(data);
+      console.log('[GAPI-WS] Received:', msg.type);
+
+      // 處理認證回應
+      if (msg.type === 'auth_ok') {
+        this.authenticated = true;
+        this.sessionId = msg.payload.session_id;
+        
+        const pending = this.pendingRequests.get('auth');
+        if (pending) {
+          pending.resolve(this.sessionId);
+          this.pendingRequests.delete('auth');
+        }
+        
+        this.startHeartbeat();
+        this.notifyAdmin({ type: 'gapi_connected', sessionId: this.sessionId });
+        return;
+      }
+
+      if (msg.type === 'auth_error') {
+        const pending = this.pendingRequests.get('auth');
+        if (pending) {
+          pending.reject(new Error(msg.payload.message || 'Auth failed'));
+          this.pendingRequests.delete('auth');
+        }
+        return;
+      }
+
+      // 處理心跳回應
+      if (msg.type === 'pong') {
+        console.log('[GAPI-WS] Pong received');
+        return;
+      }
+
+      // 處理訊息流
+      if (msg.type === 'message_stream') {
+        const handler = this.messageHandlers.get('stream');
+        if (handler) handler(msg.payload);
+        return;
+      }
+
+      // 處理一般訊息
+      if (msg.type === 'conversation_data') {
+        const handler = this.messageHandlers.get('conversation_data');
+        if (handler) handler(msg.payload);
+        return;
+      }
+
+      if (msg.type === 'message_sent') {
+        const handler = this.messageHandlers.get('message_sent');
+        if (handler) handler(msg.payload);
+        return;
+      }
+
+      // 處理事件推送
+      if (msg.type === 'event_push') {
+        const handler = this.messageHandlers.get('event_push');
+        if (handler) handler(msg.payload);
+        // 廣播給 Admin Web
+        broadcastAdminEvent('gapi_event', msg.payload);
+        return;
+      }
+
+    } catch (error) {
+      console.error('[GAPI-WS] Message parse error:', error);
+    }
+  }
+
+  // 發送訊息
+  send(message) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+      return true;
+    }
+    console.warn('[GAPI-WS] Cannot send, not connected');
+    return false;
+  }
+
+  // 同步對話
+  async syncConversation(conversationId, lastMessageTs = 0) {
+    if (!this.authenticated) {
+      throw new Error('Not authenticated');
+    }
+
+    return new Promise((resolve, reject) => {
+      const requestId = `sync_${Date.now()}`;
+      
+      this.pendingRequests.set(requestId, { resolve, reject });
+      
+      this.send({
+        type: 'conversation_sync',
+        payload: {
+          conversation_id: conversationId,
+          last_message_ts: lastMessageTs
+        }
+      });
+
+      // 註冊一次性 handler
+      this.messageHandlers.set('conversation_data', (data) => {
+        if (data.conversation_id === conversationId) {
+          const pending = this.pendingRequests.get(requestId);
+          if (pending) {
+            pending.resolve(data);
+            this.pendingRequests.delete(requestId);
+            this.messageHandlers.delete('conversation_data');
+          }
+        }
+      });
+
+      setTimeout(() => {
+        if (this.pendingRequests.has(requestId)) {
+          this.pendingRequests.delete(requestId);
+          this.messageHandlers.delete('conversation_data');
+          reject(new Error('Sync timeout'));
+        }
+      }, 10000);
+    });
+  }
+
+  // 發送訊息
+  async sendMessage(conversationId, content, attachments = []) {
+    if (!this.authenticated) {
+      throw new Error('Not authenticated');
+    }
+
+    return new Promise((resolve, reject) => {
+      const requestId = `msg_${Date.now()}`;
+      
+      this.pendingRequests.set(requestId, { resolve, reject });
+      
+      this.send({
+        type: 'message_send',
+        payload: {
+          conversation_id: conversationId,
+          content,
+          attachments
+        }
+      });
+
+      // 註冊 handler
+      this.messageHandlers.set('message_sent', (data) => {
+        const pending = this.pendingRequests.get(requestId);
+        if (pending) {
+          pending.resolve(data);
+          this.pendingRequests.delete(requestId);
+        }
+      });
+
+      setTimeout(() => {
+        if (this.pendingRequests.has(requestId)) {
+          this.pendingRequests.delete(requestId);
+          this.messageHandlers.delete('message_sent');
+          reject(new Error('Send message timeout'));
+        }
+      }, 30000);
+    });
+  }
+
+  // 開始心跳
+  startHeartbeat() {
+    this.pingTimer = setInterval(() => {
+      if (this.authenticated) {
+        this.send({ type: 'ping' });
+      }
+    }, PING_INTERVAL);
+  }
+
+  // 安排重連
+  scheduleReconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    
+    this.reconnectTimer = setTimeout(() => {
+      if (this.extensionId) {
+        console.log('[GAPI-WS] Attempting to reconnect...');
+        this.connect(this.extensionId).catch(err => {
+          console.error('[GAPI-WS] Reconnect failed:', err);
+        });
+      }
+    }, RECONNECT_INTERVAL);
+  }
+
+  // 斷開連接
+  disconnect() {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    if (this.ws) {
+      this.ws.close();
+    }
+    this.authenticated = false;
+    this.sessionId = null;
+  }
+
+  // 註冊訊息處理器
+  on(event, handler) {
+    this.messageHandlers.set(event, handler);
+  }
+
+  // 通知 Admin Web
+  notifyAdmin(data) {
+    broadcastAdminEvent('gapi_status', data);
+  }
+
+  // 取得連接狀態
+  getStatus() {
+    return {
+      connected: this.authenticated,
+      sessionId: this.sessionId,
+      extensionId: this.extensionId
+    };
+  }
+}
+
+// 全域 GAPI WebSocket 客戶端實例
+const gapiClient = new GAPIWebSocketClient();
+
+// ========== GAPI HTTP Client (P1.3) ==========
+// HTTP client for REST API calls (POST /v1/messages, etc.)
+
+class GAPIHttpClient {
+  constructor() {
+    this.baseUrl = GAPI_HTTP_URL;
+    this.extensionId = null;
+    this.authToken = null;
+  }
+
+  // 初始化 HTTP 客戶端 (透過 TokenManager 從 server 取得 token)
+  async init(extensionId) {
+    this.extensionId = extensionId;
+    this.authToken = await tokenManager.getToken(extensionId);
+  }
+
+  // 發送 HTTP 請求（內部方法）
+  async _request(method, endpoint, data = null, timeout = 30000) {
+    const url = `${this.baseUrl}${endpoint}`;
+    
+    const options = {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.authToken}`
+      }
+    };
+
+    if (data && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+      options.body = JSON.stringify(data);
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    options.signal = controller.signal;
+
+    try {
+      const response = await fetch(url, options);
+      clearTimeout(timeoutId);
+      
+      // 解析回應
+      const contentType = response.headers.get('content-type');
+      let result;
+      if (contentType && contentType.includes('application/json')) {
+        result = await response.json();
+      } else {
+        result = await response.text();
+      }
+
+      // 檢查 HTTP 狀態
+      if (!response.ok) {
+        throw new Error(result.message || result.error || `HTTP ${response.status}`);
+      }
+
+      return result;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      
+      // 區分錯誤類型
+      if (error.name === 'AbortError') {
+        throw new Error('請求超時 (timeout)');
+      }
+      if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+        throw new Error('網路錯誤：無法連接到伺服器');
+      }
+      throw error;
+    }
+  }
+
+  // POST /v1/messages - 發送訊息
+  async sendMessage(conversationId, content, attachments = []) {
+    const payload = {
+      conversation_id: conversationId,
+      content,
+      attachments
+    };
+
+    try {
+      const result = await this._request('POST', '/v1/messages', payload, 30000);
+      
+      return {
+        success: true,
+        message_id: result.message_id,
+        status: result.status,
+        data: result
+      };
+    } catch (error) {
+      console.error('[GAPI-HTTP] Send message failed:', error.message);
+      
+      return {
+        success: false,
+        error: error.message,
+        conversation_id: conversationId,
+        content
+      };
+    }
+  }
+
+  // GET /v1/conversations - 取得對話列表
+  async getConversations() {
+    return await this._request('GET', '/v1/conversations');
+  }
+
+  // GET /v1/conversations/{id} - 取得特定對話
+  async getConversation(conversationId) {
+    return await this._request('GET', `/v1/conversations/${conversationId}`);
+  }
+
+  // POST /v1/conversations - 建立新對話
+  async createConversation(title = null) {
+    const payload = title ? { title } : {};
+    return await this._request('POST', '/v1/conversations', payload);
+  }
+
+  // 儲存發送結果到本地存儲（用於追蹤）
+  async saveMessageResult(result) {
+    try {
+      // 使用全局的 GeminiLocalDB (通過 importScripts 加載)
+      if (self.GeminiLocalDB && self.GeminiLocalDB.saveMessageResult) {
+        const record = {
+          id: `msg_result_${Date.now()}`,
+          message_id: result.message_id || null,
+          conversation_id: result.conversation_id || null,
+          content: result.content || null,
+          status: result.success ? 'sent' : 'failed',
+          error: result.error || null,
+          timestamp: Date.now()
+        };
+        
+        await self.GeminiLocalDB.saveMessageResult(record);
+        return record;
+      } else {
+        // Fallback: 使用 chrome.storage.local
+        const record = {
+          id: `msg_result_${Date.now()}`,
+          message_id: result.message_id || null,
+          conversation_id: result.conversation_id || null,
+          content: result.content || null,
+          status: result.success ? 'sent' : 'failed',
+          error: result.error || null,
+          timestamp: Date.now()
+        };
+        
+        const key = `msg_result_${record.id}`;
+        const existing = await new Promise(resolve => {
+          chrome.storage.local.get([key], r => resolve(r[key] || []));
+        });
+        
+        const results = Array.isArray(existing) ? existing : [];
+        results.push(record);
+        
+        await new Promise(resolve => {
+          chrome.storage.local.set({ [key]: results }, resolve);
+        });
+        
+        return record;
+      }
+    } catch (error) {
+      console.error('[GAPI-HTTP] Save result failed:', error);
+      return null;
+    }
+  }
+
+	// ========== P3.1: 圖片上傳方法 ==========
+
+	// POST /v1/images/upload - 上傳圖片（base64 格式）
+	async uploadImage(imageDataUrl, conversationId = null, filename = null) {
+		try {
+			const formData = new FormData();
+			formData.append('image_data', imageDataUrl);
+			if (conversationId) {
+				formData.append('conversation_id', conversationId);
+			}
+			if (filename) {
+				formData.append('filename', filename);
+			}
+			
+			const url = `${this.baseUrl}/v1/images/upload`;
+			const response = await fetch(url, {
+				method: 'POST',
+				headers: {
+					'Authorization': `Bearer ${this.authToken}`
+				},
+				body: formData
+			});
+			
+			if (!response.ok) {
+				const error = await response.text();
+				throw new Error(error || `HTTP ${response.status}`);
+			}
+			
+			const result = await response.json();
+			return {
+				success: true,
+				image_id: result.image_id,
+				url: result.url,
+				filename: result.filename,
+				mime_type: result.mime_type,
+				size: result.size,
+				created_at: result.created_at
+			};
+		} catch (error) {
+			console.error('[GAPI-HTTP] Upload image failed:', error.message);
+			return { success: false, error: error.message };
+		}
+	}
+	
+	// POST /v1/images/upload-file - 上傳圖片（File 物件）
+	async uploadImageFile(file, conversationId = null) {
+		try {
+			const formData = new FormData();
+			formData.append('file', file);
+			if (conversationId) {
+				formData.append('conversation_id', conversationId);
+			}
+			
+			const url = `${this.baseUrl}/v1/images/upload-file`;
+			const response = await fetch(url, {
+				method: 'POST',
+				headers: {
+					'Authorization': `Bearer ${this.authToken}`
+				},
+				body: formData
+			});
+			
+			if (!response.ok) {
+				const error = await response.text();
+				throw new Error(error || `HTTP ${response.status}`);
+			}
+			
+			const result = await response.json();
+			return {
+				success: true,
+				image_id: result.image_id,
+				url: result.url,
+				filename: result.filename,
+				mime_type: result.mime_type,
+				size: result.size,
+				created_at: result.created_at
+			};
+		} catch (error) {
+			console.error('[GAPI-HTTP] Upload image file failed:', error.message);
+			return { success: false, error: error.message };
+		}
+	}
+	
+	// GET /v1/images - 列出圖片
+	async listImages(conversationId = null) {
+		try {
+			let endpoint = '/v1/images';
+			if (conversationId) {
+				endpoint += `?conversation_id=${encodeURIComponent(conversationId)}`;
+			}
+			return await this._request('GET', endpoint);
+		} catch (error) {
+			console.error('[GAPI-HTTP] List images failed:', error.message);
+			return { images: [], count: 0, error: error.message };
+		}
+	}
+	
+	// GET /v1/images/{image_id} - 取得圖片 URL
+	getImageUrl(imageId) {
+		return `${this.baseUrl}/v1/images/${imageId}`;
+	}
+	
+	// DELETE /v1/images/{image_id} - 刪除圖片
+	async deleteImage(imageId) {
+		try {
+			const result = await this._request('DELETE', `/v1/images/${imageId}`);
+			return { success: true, ...result };
+		} catch (error) {
+			console.error('[GAPI-HTTP] Delete image failed:', error.message);
+			return { success: false, error: error.message };
+		}
+	}
+}
+
+// 全域 GAPI HTTP 客戶端實例
+const gapiHttpClient = new GAPIHttpClient();
+
+// 初始化 GAPI HTTP 連接
+async function initGAPIHttpConnection() {
+  try {
+    const result = await chrome.storage.local.get(['gapiExtensionId']);
+    let extensionId = result.gapiExtensionId;
+    
+    if (!extensionId) {
+      extensionId = `ext_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      await chrome.storage.local.set({ gapiExtensionId: extensionId });
+    }
+
+    await gapiHttpClient.init(extensionId);
+    console.log('[Background] GAPI HTTP client initialized');
+    
+  } catch (error) {
+    console.error('[Background] GAPI HTTP client init failed:', error);
+  }
+}
+
+// 初始化 GAPI 連接
+async function initGAPIConnection() {
+  // 從 storage 取得 extension ID 或生成
+  try {
+    const result = await chrome.storage.local.get(['gapiExtensionId']);
+    let extensionId = result.gapiExtensionId;
+    
+    if (!extensionId) {
+      extensionId = `ext_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      await chrome.storage.local.set({ gapiExtensionId: extensionId });
+    }
+
+    await gapiClient.connect(extensionId);
+    console.log('[Background] GAPI connection initialized');
+    
+  } catch (error) {
+    console.error('[Background] GAPI connection failed:', error);
+  }
+}
+
+// 調用 initGAPIConnection 進行連接 (可選：延遲啟動)
+// initGAPIConnection(); // 註釋掉，需要時再手動調用
+
 // ========== Auto download toggle ==========
 // Default: disabled (per user request)
 const DEFAULT_AUTO_DOWNLOAD_ENABLED = false;
@@ -78,6 +789,17 @@ chrome.runtime.onConnectExternal.addListener((port) => {
         console.debug('[Background] 斷開非管理通道連接時發生錯誤（可忽略）:', disconnectError?.message || disconnectError);
       }
       return;
+    }
+
+    // Enforce max size of 20 ports to prevent resource exhaustion
+    if (adminPorts.size >= 20) {
+      const oldest = adminPorts.values().next().value;
+      try {
+        oldest.disconnect();
+      } catch (e) {
+        console.debug('[Background] Failed to disconnect oldest admin port:', e?.message || e);
+      }
+      adminPorts.delete(oldest);
     }
 
     adminPorts.add(port);
@@ -330,11 +1052,18 @@ const remoteSessions = new Map(); // sessionId -> { messages: [], images: [], cr
 chrome.runtime.onInstalled.addListener(async () => {
   console.log('Gemini 對話分類助手已安裝');
   
+  // [強制行為] 讓插件點擊時直接開啟側邊欄
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((error) => console.error(error));
+  
   // 設置 Side Panel 為在 Gemini 網頁上自動啟用
   await chrome.sidePanel.setOptions({
     path: 'sidepanel.html',
     enabled: true
   });
+  
+  // [P1.3] 初始化 GAPI HTTP 客戶端
+  await initGAPIHttpConnection();
   
   // 初始化專案存儲（如果不存在）
   chrome.storage.local.get(['interceptedImages', 'projects'], (result) => {
@@ -345,7 +1074,7 @@ chrome.runtime.onInstalled.addListener(async () => {
       chrome.storage.local.set({
         projects: {
           eell: { name: 'EELL', images: [] },
-          badmintonComic: { name: '羽球漫畫', images: [] }
+          generalProject: { name: '漫畫', images: [] }
         }
       });
     }
@@ -638,7 +1367,34 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 // 統一監聽來自 Content Script 和 Side Panel 的消息
+// 監聽來自 content.js 的抓取結果
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // [Step 6] 處理數據持久化
+    if (message.action === 'PERSIST_RESPONSE') {
+        const { site, text, timestamp } = message;
+        console.log(`[Lobster] 持久化數據: ${site}`);
+        
+        // 使用 db.js 提供的方法
+        self.GeminiLocalDB.addOrMergeMessages({
+            chatId: 'lobster_archive', // 暫時統一存放至一個 archive，後續再細分
+            userProfile: site,
+            messages: [{ role: 'model', text: text, timestamp: timestamp }]
+        }).then(res => {
+            console.log('[Lobster] 數據物理入庫成功:', res);
+        }).catch(err => {
+            console.error('[Lobster] 數據入庫失敗:', err);
+        });
+        return false; // 不需要異步回覆
+    }
+
+    if (message.action === 'ACTION_RESULT_READY') {
+        console.log('[GEMINISIDE] 收到抓取結果:', message.payload);
+        // 未來這裡將對接 Native Messaging
+        // 目前先執行 console 輸出與狀態儲存
+        chrome.storage.local.set({ last_result: message.payload });
+        sendResponse({ status: 'received' });
+        return true;
+    }
   // 處理從 API 響應中提取的圖片 URL
   if (message.action === 'IMAGE_URL_EXTRACTED') {
     const { url, source } = message;
@@ -3125,9 +3881,28 @@ async function handleRemoteSendMessage(message, sendResponse) {
         // 啟動監聽回復的定時器（等待 Gemini 回復）
         startMonitoringResponse(sessionId, geminiTab.id, sendTimestamp);
         
+        // [P1.3] 回傳結果到 GAPI Server (HTTP POST /v1/messages)
+        const conversationId = session.conversationId || `conv_${sessionId}`;
+        let serverResult = { success: false, error: 'HTTP client not initialized' };
+        
+        try {
+          if (gapiHttpClient.extensionId) {
+            serverResult = await gapiHttpClient.sendMessage(conversationId, messageText);
+            // 儲存結果到本地數據庫
+            await gapiHttpClient.saveMessageResult(serverResult);
+            console.log('[Background] [P1.3] Message sent to GAPI Server:', serverResult);
+          } else {
+            console.log('[Background] [P1.3] GAPI HTTP client not initialized, skipping server push');
+          }
+        } catch (serverError) {
+          console.error('[Background] [P1.3] Failed to send to GAPI Server:', serverError);
+          serverResult = { success: false, error: serverError.message };
+        }
+        
         sendResponse({ 
           success: true, 
           sessionId: sessionId,
+          gapiServerResult: serverResult,
           message: '消息已發送，請稍後調用 getResult 獲取結果（包括回復和圖片）'
         });
       } else {
@@ -3336,7 +4111,7 @@ async function addImageToProject(data) {
     const result = await chrome.storage.local.get(['projects']);
     const projects = result.projects || {
       eell: { name: 'EELL', images: [] },
-      badmintonComic: { name: '羽球漫畫', images: [] }
+      generalProject: { name: '漫畫', images: [] }
     };
     
     if (projects[projectType]) {

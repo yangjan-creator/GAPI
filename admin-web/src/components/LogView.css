@@ -1,0 +1,41 @@
+.log-view {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 12px;
+  background: rgba(2, 6, 23, 0.35);
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.log-entry {
+  margin-bottom: 4px;
+  display: flex;
+  gap: 8px;
+}
+
+.log-entry:last-child {
+  margin-bottom: 0;
+}
+
+.log-time {
+  color: var(--muted2);
+}
+
+.log-level {
+  width: 60px;
+  display: inline-block;
+}
+
+.log-level-info {
+  color: var(--blue);
+}
+
+.log-level-error {
+  color: var(--red);
+}
+
+.log-message {
+  flex: 1;
+  color: var(--text);
+}
