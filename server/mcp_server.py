@@ -9,6 +9,8 @@ import sqlite3
 import uuid
 import json
 import time
+import hmac
+import hashlib
 import secrets
 import logging
 import asyncio
@@ -690,10 +692,39 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         validation = validate_token(token)
 
         if not validation:
-            logger.warning("WebSocket auth failed for client %s", client_id)
+            # Inline diagnosis: determine why validate_token returned None
+            failure_reason = "malformed"
+            if token and token.startswith("ext_"):
+                try:
+                    parts = token[4:].rsplit("_", 2)
+                    if len(parts) >= 3:
+                        ext_id, ts_str, sig = parts[0], parts[1], parts[2]
+                        ts = int(ts_str)
+                        now_ms = int(time.time() * 1000)
+                        if now_ms - ts > TOKEN_EXPIRE_SECONDS * 1000:
+                            failure_reason = "expired"
+                        else:
+                            expected = hmac.new(
+                                AUTH_SECRET.encode(),
+                                f"{ext_id}:{ts}".encode(),
+                                hashlib.sha256
+                            ).hexdigest()[:32]
+                            if not hmac.compare_digest(sig, expected):
+                                failure_reason = "bad_signature"
+                except (ValueError, IndexError):
+                    failure_reason = "malformed"
+
+            logger.warning(
+                "WebSocket auth failed for client %s: reason=%s",
+                client_id, failure_reason
+            )
             await websocket.send_text(json.dumps({
                 "type": "auth_error",
-                "payload": {"error": "invalid_token", "message": "Authentication failed"}
+                "payload": {
+                    "error": "invalid_token",
+                    "message": "Authentication failed",
+                    "reason": failure_reason
+                }
             }))
             await websocket.close(code=1008)
             return

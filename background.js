@@ -23,8 +23,13 @@ const adminPorts = new Set();
 const DEFAULT_GAPI_HOST = 'localhost:18799';
 let GAPI_WS_URL = `ws://${DEFAULT_GAPI_HOST}/ws`;
 let GAPI_HTTP_URL = `http://${DEFAULT_GAPI_HOST}`;
-const RECONNECT_INTERVAL = 5000; // 5 seconds
-const PING_INTERVAL = 30000; // 30 seconds
+const RECONNECT_INTERVAL = 5000; // 5 seconds (fast-path setTimeout)
+const PING_INTERVAL = 60000; // 1 minute (chrome.alarms minimum interval)
+
+// chrome.alarms names for MV3 service worker persistence
+const ALARM_TOKEN_REFRESH = 'gapi_token_refresh';
+const ALARM_HEARTBEAT = 'gapi_heartbeat';
+const ALARM_RECONNECT = 'gapi_reconnect';
 
 // 從 storage 讀取 Server 配置，更新全域 URL
 async function loadServerConfig() {
@@ -69,26 +74,30 @@ class TokenManager {
     this.serverUrl = serverUrl;
     this.token = null;
     this.expiresAt = 0;
-    this.refreshTimer = null;
+    this.extensionId = null;
   }
 
-  async getToken(extensionId) {
-    // Return cached token if still valid (with 5-min buffer)
-    if (this.token && Date.now() < this.expiresAt - 300000) {
-      return this.token;
-    }
+  async getToken(extensionId, forceRefresh = false) {
+    this.extensionId = extensionId;
 
-    // Try to load from storage
-    try {
-      const stored = await chrome.storage.local.get(['gapi_token', 'gapi_token_expires']);
-      if (stored.gapi_token && Date.now() < (stored.gapi_token_expires || 0) - 300000) {
-        this.token = stored.gapi_token;
-        this.expiresAt = stored.gapi_token_expires;
-        this.scheduleRefresh(extensionId);
+    if (!forceRefresh) {
+      // Return cached token if still valid (with 5-min buffer)
+      if (this.token && Date.now() < this.expiresAt - 300000) {
         return this.token;
       }
-    } catch (e) {
-      console.warn('[TokenManager] Storage read failed:', e);
+
+      // Try to load from storage
+      try {
+        const stored = await chrome.storage.local.get(['gapi_token', 'gapi_token_expires']);
+        if (stored.gapi_token && Date.now() < (stored.gapi_token_expires || 0) - 300000) {
+          this.token = stored.gapi_token;
+          this.expiresAt = stored.gapi_token_expires;
+          this.scheduleRefresh();
+          return this.token;
+        }
+      } catch (e) {
+        console.warn('[TokenManager] Storage read failed:', e);
+      }
     }
 
     // Fetch new token from server
@@ -96,8 +105,11 @@ class TokenManager {
   }
 
   async refreshToken(extensionId) {
+    const eid = extensionId || this.extensionId;
+    if (!eid) throw new Error('No extensionId for token refresh');
+
     try {
-      const resp = await fetch(`${this.serverUrl}/v1/auth/token?extension_id=${encodeURIComponent(extensionId)}`, {
+      const resp = await fetch(`${this.serverUrl}/v1/auth/token?extension_id=${encodeURIComponent(eid)}`, {
         method: 'POST'
       });
       if (!resp.ok) throw new Error(`Token request failed: ${resp.status}`);
@@ -116,29 +128,29 @@ class TokenManager {
         console.warn('[TokenManager] Storage write failed:', e);
       }
 
-      this.scheduleRefresh(extensionId);
+      this.scheduleRefresh();
+      console.log('[TokenManager] Token refreshed, expires at', new Date(this.expiresAt).toISOString());
       return this.token;
     } catch (e) {
       console.error('[TokenManager] Failed to get token:', e);
-      return this.token; // Return stale token as fallback
+      throw e; // Propagate error — do not return stale token
     }
   }
 
-  scheduleRefresh(extensionId) {
-    if (this.refreshTimer) clearTimeout(this.refreshTimer);
-    const delay = Math.max(0, this.expiresAt - Date.now() - 300000);
-    if (delay > 0) {
-      this.refreshTimer = setTimeout(() => this.refreshToken(extensionId), delay);
+  scheduleRefresh() {
+    // Use chrome.alarms for MV3 persistence (survives service worker suspension)
+    const delayMs = Math.max(0, this.expiresAt - Date.now() - 300000);
+    if (delayMs > 0) {
+      const delayMinutes = Math.max(1, delayMs / 60000); // chrome.alarms minimum = 1 min
+      chrome.alarms.create(ALARM_TOKEN_REFRESH, { delayInMinutes: delayMinutes });
+      console.log(`[TokenManager] Scheduled refresh in ${Math.round(delayMinutes)} min`);
     }
   }
 
   invalidate() {
     this.token = null;
     this.expiresAt = 0;
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = null;
-    }
+    chrome.alarms.clear(ALARM_TOKEN_REFRESH);
     try {
       chrome.storage.local.remove(['gapi_token', 'gapi_token_expires']);
     } catch (e) {}
@@ -155,33 +167,39 @@ class GAPIWebSocketClient {
     this.extensionId = null;
     this.authenticated = false;
     this.reconnectTimer = null;
-    this.pingTimer = null;
     this.messageHandlers = new Map();
     this.pendingRequests = new Map();
   }
 
   // 生成認證 Token (透過 TokenManager 從 server 取得)
-  async generateToken(extensionId) {
-    return tokenManager.getToken(extensionId);
+  async generateToken(extensionId, forceRefresh = false) {
+    return tokenManager.getToken(extensionId, forceRefresh);
   }
 
   // 連接到 GAPI Server
-  async connect(extensionId) {
+  async connect(extensionId, options = {}) {
     this.extensionId = extensionId;
-    
+    const forceNewToken = options.forceNewToken || false;
+
+    // Clear any pending reconnect alarm since we're connecting now
+    chrome.alarms.clear(ALARM_RECONNECT);
+
     return new Promise((resolve, reject) => {
       try {
-        console.log(`[GAPI-WS] Connecting to ${GAPI_WS_URL}/${extensionId}...`);
+        console.log(`[GAPI-WS] Connecting to ${GAPI_WS_URL}/${extensionId}... (forceNewToken=${forceNewToken})`);
         this.ws = new WebSocket(`${GAPI_WS_URL}/${extensionId}`);
 
         this.ws.onopen = () => {
           console.log('[GAPI-WS] Connection opened, sending auth...');
-          // 發送認證訊息
-          this.generateToken(extensionId).then(token => {
+          // 發送認證訊息 (force refresh token on reconnect)
+          this.generateToken(extensionId, forceNewToken).then(token => {
             this.send({
               type: 'auth',
               payload: { token }
             });
+          }).catch(err => {
+            console.error('[GAPI-WS] Token generation failed:', err);
+            reject(err);
           });
         };
 
@@ -241,11 +259,24 @@ class GAPIWebSocketClient {
       }
 
       if (msg.type === 'auth_error') {
+        const reason = msg.payload.reason || 'unknown';
+        console.warn(`[GAPI-WS] Auth failed: ${msg.payload.message} (reason=${reason})`);
+
         const pending = this.pendingRequests.get('auth');
         if (pending) {
           pending.reject(new Error(msg.payload.message || 'Auth failed'));
           this.pendingRequests.delete('auth');
         }
+
+        // Invalidate stale token, close zombie WS, schedule reconnect with fresh token
+        tokenManager.invalidate();
+        if (this.ws) {
+          this.ws.onclose = null; // prevent onclose from scheduling a duplicate reconnect
+          this.ws.close();
+          this.ws = null;
+        }
+        this.authenticated = false;
+        this.scheduleReconnect();
         return;
       }
 
@@ -384,29 +415,29 @@ class GAPIWebSocketClient {
     });
   }
 
-  // 開始心跳
+  // 開始心跳 — use chrome.alarms for MV3 persistence
   startHeartbeat() {
-    this.pingTimer = setInterval(() => {
-      if (this.authenticated) {
-        this.send({ type: 'ping' });
-      }
-    }, PING_INTERVAL);
+    chrome.alarms.create(ALARM_HEARTBEAT, { periodInMinutes: 1 });
   }
 
-  // 安排重連
+  // 安排重連 — dual strategy: fast setTimeout + chrome.alarms fallback
   scheduleReconnect() {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
     }
-    
+
+    // Fast path: 5s setTimeout (works if service worker stays active)
     this.reconnectTimer = setTimeout(() => {
       if (this.extensionId) {
-        console.log('[GAPI-WS] Attempting to reconnect...');
-        this.connect(this.extensionId).catch(err => {
-          console.error('[GAPI-WS] Reconnect failed:', err);
+        console.log('[GAPI-WS] Fast reconnect attempt...');
+        this.connect(this.extensionId, { forceNewToken: true }).catch(err => {
+          console.error('[GAPI-WS] Fast reconnect failed:', err);
         });
       }
     }, RECONNECT_INTERVAL);
+
+    // Fallback: chrome.alarms (1 min) — guaranteed to fire even after SW suspension
+    chrome.alarms.create(ALARM_RECONNECT, { delayInMinutes: 1 });
   }
 
   // 同步活躍頁面到 GAPI Server
@@ -425,14 +456,18 @@ class GAPIWebSocketClient {
 
   // 斷開連接
   disconnect() {
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-    }
+    // Clear all timers and alarms
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
+    chrome.alarms.clear(ALARM_HEARTBEAT);
+    chrome.alarms.clear(ALARM_RECONNECT);
+
     if (this.ws) {
+      this.ws.onclose = null; // prevent auto-reconnect
       this.ws.close();
+      this.ws = null;
     }
     this.authenticated = false;
     this.sessionId = null;
@@ -460,6 +495,35 @@ class GAPIWebSocketClient {
 
 // 全域 GAPI WebSocket 客戶端實例
 const gapiClient = new GAPIWebSocketClient();
+
+// ========== chrome.alarms handler (MV3 persistent scheduling) ==========
+chrome.alarms.onAlarm.addListener((alarm) => {
+  console.log(`[GAPI-Alarm] Fired: ${alarm.name}`);
+
+  if (alarm.name === ALARM_TOKEN_REFRESH) {
+    tokenManager.refreshToken().catch(err => {
+      console.error('[GAPI-Alarm] Token refresh failed:', err);
+    });
+    return;
+  }
+
+  if (alarm.name === ALARM_HEARTBEAT) {
+    if (gapiClient.authenticated) {
+      gapiClient.send({ type: 'ping' });
+    }
+    return;
+  }
+
+  if (alarm.name === ALARM_RECONNECT) {
+    if (!gapiClient.authenticated && gapiClient.extensionId) {
+      console.log('[GAPI-Alarm] Reconnect alarm triggered');
+      gapiClient.connect(gapiClient.extensionId, { forceNewToken: true }).catch(err => {
+        console.error('[GAPI-Alarm] Reconnect failed:', err);
+      });
+    }
+    return;
+  }
+});
 
 // ========== GAPI HTTP Client (P1.3) ==========
 // HTTP client for REST API calls (POST /v1/messages, etc.)
