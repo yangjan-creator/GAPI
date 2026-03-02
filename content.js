@@ -361,32 +361,30 @@
   // ========== 事件監聽器管理器 ==========
   
   const eventManager = {
-    listeners: new Map(), // element -> Set<{type, handler, options}>
-    
-    // 添加事件監聽器（自動管理）
+    _listeners: new WeakMap(), // element -> Set<{type, handler, options}>
+    _trackedElements: new Set(), // 追蹤所有註冊過的元素，供 cleanup 遍歷
+
     add(element, type, handler, options = false) {
       if (!element) return;
-      
-      const key = this._getElementKey(element);
-      if (!this.listeners.has(key)) {
-        this.listeners.set(key, new Set());
+
+      if (!this._listeners.has(element)) {
+        this._listeners.set(element, new Set());
       }
-      
+
       const listener = { type, handler, options };
-      this.listeners.get(key).add(listener);
+      this._listeners.get(element).add(listener);
+      this._trackedElements.add(element);
       element.addEventListener(type, handler, options);
-      
+
       return () => this.remove(element, type, handler);
     },
-    
-    // 移除事件監聽器
+
     remove(element, type, handler) {
       if (!element) return;
-      
-      const key = this._getElementKey(element);
-      const listeners = this.listeners.get(key);
+
+      const listeners = this._listeners.get(element);
       if (!listeners) return;
-      
+
       for (const listener of listeners) {
         if (listener.type === type && listener.handler === handler) {
           element.removeEventListener(type, handler, listener.options);
@@ -394,55 +392,38 @@
           break;
         }
       }
-      
+
       if (listeners.size === 0) {
-        this.listeners.delete(key);
+        this._listeners.delete(element);
+        this._trackedElements.delete(element);
       }
     },
-    
-    // 移除元素的所有事件監聽器
+
     removeAll(element) {
       if (!element) return;
-      
-      const key = this._getElementKey(element);
-      const listeners = this.listeners.get(key);
+
+      const listeners = this._listeners.get(element);
       if (!listeners) return;
-      
+
       for (const listener of listeners) {
         element.removeEventListener(listener.type, listener.handler, listener.options);
       }
-      
-      this.listeners.delete(key);
+
+      this._listeners.delete(element);
+      this._trackedElements.delete(element);
     },
-    
-    // 清理所有事件監聽器
+
     cleanup() {
-      for (const [key, listeners] of this.listeners.entries()) {
-        const element = this._getElementByKey(key);
-        if (element) {
+      for (const element of this._trackedElements) {
+        const listeners = this._listeners.get(element);
+        if (listeners) {
           for (const listener of listeners) {
             element.removeEventListener(listener.type, listener.handler, listener.options);
           }
         }
+        this._listeners.delete(element);
       }
-      this.listeners.clear();
-    },
-    
-    // 獲取元素的唯一鍵
-    _getElementKey(element) {
-      if (element._eventManagerKey) {
-        return element._eventManagerKey;
-      }
-      const key = `elem_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      element._eventManagerKey = key;
-      return key;
-    },
-    
-    // 根據鍵獲取元素（需要遍歷，效率較低，僅用於清理）
-    _getElementByKey(key) {
-      // 由於無法直接從鍵獲取元素，我們需要遍歷所有元素
-      // 這是一個備用方案，實際使用時應該直接傳遞元素
-      return null; // 返回 null，清理時需要手動傳遞元素
+      this._trackedElements.clear();
     }
   };
 
@@ -551,6 +532,39 @@
     }
   };
 
+  // ========== 防抖工具 + Observer 計數器 ==========
+
+  function debounce(fn, delay) {
+    let timerId = null;
+    const debounced = (...args) => {
+      if (timerId !== null) clearTimeout(timerId);
+      timerId = setTimeout(() => {
+        timerId = null;
+        fn(...args);
+      }, delay);
+    };
+    debounced.cancel = () => {
+      if (timerId !== null) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+    };
+    return debounced;
+  }
+
+  let _observerCounter = 0;
+  function nextObserverName(prefix) {
+    return `${prefix}_${++_observerCounter}`;
+  }
+
+  // 防抖的圖片提取（1.5 秒內只執行一次）
+  const debouncedImageExtraction = debounce(() => {
+    if (isRuntimeValid() && currentChatId) {
+      scrapeMessages();
+      extractGeneratedImages();
+    }
+  }, 1500);
+
   // ========== Runtime 檢查統一函數 ==========
   
   // 檢查 runtime 是否有效（統一入口）
@@ -652,9 +666,7 @@
   let lastAutoImageClickAt = 0;
   const AUTO_IMAGE_CLICK_COOLDOWN = 4000;
   let lastModelResponseCount = 0; // 記錄上次檢測到的模型回復數量
-  let lastImageCount = 0; // 記錄上次檢測到的圖片數量（新增）
   let scrapeTimeout = null; // 延遲提取的定時器
-  let imageCheckInterval = null; // 定期檢查圖片的定時器（新增）
   let forceExtractInterval = null; // 強制提取圖片的定時器（每 2 秒掃描一次）
   // History API 和 popstate 清理用
   let _originalPushState = null;
@@ -865,121 +877,21 @@
   // 初始化
   init();
 
-  // 檢測用戶檔案
+  // 檢測用戶檔案（委派給當前站點 adapter）
   function detectUserProfile() {
     try {
-      // console.log('[Gemini 分類助手] [用戶檢測] 開始檢測用戶檔案...'); // 已關閉日誌
-
-      // 策略 0（最穩定且成本最低）: 從 URL 判斷 Google 帳號索引（多帳號常見 /u/0/ 或 authuser=0）
-      // - 例: https://gemini.google.com/u/1/app
-      // - 例: https://gemini.google.com/app?authuser=1
-      try {
-        const pathname = window.location.pathname || '';
-        const href = window.location.href || '';
-        const uMatch = pathname.match(/\/u\/(\d+)\//);
-        if (uMatch && uMatch[1] !== undefined) {
-          currentUserProfile = `u${uMatch[1]}`;
+      const registry = window.__GAPI_SiteRegistry;
+      const adapter = registry ? registry.getCurrentAdapter() : null;
+      if (adapter && typeof adapter.detectUserProfile === 'function') {
+        const result = adapter.detectUserProfile();
+        if (result) {
+          currentUserProfile = result;
           return;
         }
-        const authMatch = href.match(/[?&]authuser=(\d+)/);
-        if (authMatch && authMatch[1] !== undefined) {
-          currentUserProfile = `u${authMatch[1]}`;
-          return;
-        }
-      } catch (e) {
-        // 忽略 URL 解析失敗
       }
-      
-      // 策略 1: 嘗試從頁面元素中獲取用戶信息（頭像、名稱等）
-      const userSelectors = [
-        '[aria-label*="Google Account"]',
-        '[aria-label*="Google 帳戶"]',
-        '[aria-label*="Google 帳號"]',
-        'a[href*="myaccount.google.com"]',
-        'img[alt*="@"]', // 包含 @ 的圖片 alt（可能是用戶頭像）
-        '[data-testid*="avatar"]',
-        '[aria-label*="@"]',
-        '[class*="avatar"]',
-        '[class*="user"]',
-        '[class*="account"]'
-      ];
-      
-      for (const selector of userSelectors) {
-        const elements = document.querySelectorAll(selector);
-        for (const el of elements) {
-          const alt = el.getAttribute('alt') || '';
-          const ariaLabel = el.getAttribute('aria-label') || '';
-          const src = el.getAttribute('src') || '';
-          const href = el.getAttribute('href') || '';
-          
-          // 嘗試從 alt 或 aria-label 中提取郵箱
-          const emailMatch = (alt + ' ' + ariaLabel).match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/);
-          if (emailMatch && emailMatch[1]) {
-            const email = emailMatch[1];
-            // 使用郵箱前綴作為檔案標識（移除特殊字符）
-            const profileId = email.split('@')[0].replace(/[^a-zA-Z0-9]/g, '_');
-            currentUserProfile = profileId;
-            // console.log('[Gemini 分類助手] [用戶檢測] ✓ 從頁面元素找到用戶檔案:', currentUserProfile); // 已關閉日誌
-            return;
-          }
-
-          // 嘗試從 myaccount 連結中的 authuser 提取（通常也能區分多帳號）
-          if (href) {
-            const authMatch = href.match(/[?&]authuser=(\d+)/);
-            if (authMatch && authMatch[1] !== undefined) {
-              currentUserProfile = `u${authMatch[1]}`;
-              return;
-            }
-          }
-          
-          // 嘗試從圖片 src 中提取（某些情況下包含用戶 ID）
-          if (src.includes('googleusercontent.com')) {
-            const userIdMatch = src.match(/\/a\/([^\/]+)/);
-            if (userIdMatch && userIdMatch[1]) {
-              currentUserProfile = userIdMatch[1].substring(0, 20); // 限制長度
-              // console.log('[Gemini 分類助手] [用戶檢測] ✓ 從圖片 URL 找到用戶檔案:', currentUserProfile); // 已關閉日誌
-              return;
-            }
-          }
-        }
-      }
-      
-      // 策略 2: 嘗試從 localStorage 獲取（某些 Google 服務會在 localStorage 存儲用戶信息）
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key && (key.includes('user') || key.includes('account') || key.includes('email'))) {
-            const value = localStorage.getItem(key);
-            if (value) {
-              try {
-                const parsed = JSON.parse(value);
-                if (parsed.email) {
-                  const profileId = parsed.email.split('@')[0].replace(/[^a-zA-Z0-9]/g, '_');
-                  currentUserProfile = profileId;
-                  // console.log('[Gemini 分類助手] [用戶檢測] ✓ 從 localStorage 找到用戶檔案:', currentUserProfile); // 已關閉日誌
-                  return;
-                }
-              } catch (e) {
-                // 不是 JSON，嘗試直接匹配郵箱
-                const emailMatch = value.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/);
-                if (emailMatch && emailMatch[1]) {
-                  const profileId = emailMatch[1].split('@')[0].replace(/[^a-zA-Z0-9]/g, '_');
-                  currentUserProfile = profileId;
-                  // console.log('[Gemini 分類助手] [用戶檢測] ✓ 從 localStorage 找到用戶檔案:', currentUserProfile); // 已關閉日誌
-                  return;
-                }
-              }
-            }
-          }
-        }
-      } catch (e) {
-        // console.log('[Gemini 分類助手] [用戶檢測] 無法訪問 localStorage:', e.message); // 已關閉日誌
-      }
-      
-      // 策略 3: 使用默認檔案（無法檢測時）
+      // adapter 未偵測到或不存在，使用 default
       if (!currentUserProfile) {
         currentUserProfile = 'default';
-        // console.log('[Gemini 分類助手] [用戶檢測] ⚠️ 無法檢測用戶，使用默認檔案: default'); // 已關閉日誌
       }
     } catch (error) {
       console.error('[Gemini 分類助手] [用戶檢測] ❌ 檢測用戶檔案時發生錯誤:', error);
@@ -996,28 +908,14 @@
     // 從第一次滑鼠點擊開始記錄
     setupFirstClickRecorder();
     
+// SITE_ADAPTERS 已遷移至 content-site-registry.js + content-site-*.js
+// 使用 window.__GAPI_SiteRegistry 取得當前站點 adapter
+
     // 等待頁面載入完成
     if (document.readyState === 'loading') {
       console.log('[Gemini 分類助手] 頁面載入中，等待 DOMContentLoaded...');
       document.addEventListener('DOMContentLoaded', () => {
         console.log('[Gemini 分類助手] DOMContentLoaded 事件觸發');
-const SITE_ADAPTERS = {
-    "gemini": { 
-        input: "div[contenteditable=\"true\"]", 
-        send: "button[aria-label=\"Send message\"]",
-        scraper: ".message-content"
-    },
-    "claude": { 
-        input: "div[contenteditable=\"true\"]", 
-        send: "button[aria-label=\"Send Message\"]",
-        scraper: ".font-claude-message"
-    },
-    "nebula": { 
-        input: "textarea", 
-        send: "button.send-button",
-        scraper: ".message-text"
-    }
-};
         startMonitoring();
       });
     } else {
@@ -1035,12 +933,12 @@ const SITE_ADAPTERS = {
 
     // 監聽來自 Side Panel 的消息
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        const hostname = window.location.hostname;
-        const adapter = hostname.includes('claude.ai') ? SITE_ADAPTERS.claude : 
-                        (hostname.includes('nebula.gg') ? SITE_ADAPTERS.nebula : SITE_ADAPTERS.gemini);
+        const registry = window.__GAPI_SiteRegistry;
+        const adapter = registry ? registry.getCurrentAdapter() : null;
 
         if (message.action === 'GET_LAST_RESPONSE') {
-            const elements = document.querySelectorAll(adapter.scraper);
+            const scraperSel = (adapter && adapter.scraperSelector) || '.message-content';
+            const elements = document.querySelectorAll(scraperSel);
             if (elements.length > 0) {
                 const rawElement = elements[elements.length - 1];
                 
@@ -1067,21 +965,31 @@ const SITE_ADAPTERS = {
         }
 
         if (message.action === 'ACTION_SEND_MESSAGE') {
-            const inputField = document.querySelector(adapter.input);
-            const sendButton = document.querySelector(adapter.send);
+            const inputSels = (adapter && adapter.inputSelectors) || ['div[contenteditable="true"]'];
+            const sendSels = (adapter && adapter.sendButtonSelectors) || ['button[aria-label*="Send"]'];
+            let inputField = null;
+            for (const sel of inputSels) {
+                inputField = document.querySelector(sel);
+                if (inputField) break;
+            }
+            let sendBtn = null;
+            for (const sel of sendSels) {
+                sendBtn = document.querySelector(sel);
+                if (sendBtn) break;
+            }
             if (inputField) {
                 inputField.focus();
                 document.execCommand('insertText', false, message.text);
                 setTimeout(() => {
-                    if (sendButton) {
-                        sendButton.click();
+                    if (sendBtn) {
+                        sendBtn.click();
                     } else {
                         inputField.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
                     }
                 }, 100);
-                sendResponse({ status: 'sent', site: hostname });
+                sendResponse({ status: 'sent', site: window.location.hostname });
             } else {
-                sendResponse({ status: 'failed', reason: `Selectors not found for ${hostname}` });
+                sendResponse({ status: 'failed', reason: `Selectors not found for ${window.location.hostname}` });
             }
             return true;
         }
@@ -1181,7 +1089,12 @@ const SITE_ADAPTERS = {
         // 查找側邊欄項目
         const sidebarItems = document.querySelectorAll('[class*="conversation"], [class*="chat"], [class*="thread"], [role="listitem"]');
         sidebarItems.forEach((item, idx) => {
-          const links = item.querySelectorAll('a[href*="/app/"]');
+          const __dbgRegistry = window.__GAPI_SiteRegistry;
+          const __dbgAdapter = __dbgRegistry ? __dbgRegistry.getCurrentAdapter() : null;
+          const __dbgLinkSel = (__dbgAdapter && typeof __dbgAdapter.sidebarLinkSelector === 'function')
+            ? __dbgAdapter.sidebarLinkSelector('')
+            : 'a[href]';
+          const links = item.querySelectorAll(__dbgLinkSel);
           links.forEach(link => {
             const href = link.getAttribute('href') || '';
             if (href.includes(currentChatId)) {
@@ -1246,7 +1159,7 @@ const SITE_ADAPTERS = {
           return true;
         }
         
-        sendMessageToGemini(messageText).then(result => {
+        sendMessageToSite(messageText).then(result => {
           console.log('[Gemini 分類助手] [消息監聽] 發送消息結果:', result);
           sendResponse(result);
         }).catch(error => {
@@ -1486,7 +1399,7 @@ const SITE_ADAPTERS = {
         return true;
       } else if (message.action === 'testSendMessage') {
         // 測試發送消息（用於調試）
-        sendMessageToGemini(message.messageText || '測試消息').then(result => {
+        sendMessageToSite(message.messageText || '測試消息').then(result => {
           sendResponse(result);
         }).catch(error => {
           sendResponse({ success: false, error: error.message });
@@ -1650,8 +1563,12 @@ const SITE_ADAPTERS = {
   function getChatIdFromUrl(url) {
     try {
       if (!url) return null;
-      const m = url.match(/\/app\/([^/?#]+)/);
-      return (m && m[1]) ? m[1] : null;
+      const registry = window.__GAPI_SiteRegistry;
+      const adapter = registry ? registry.getCurrentAdapter() : null;
+      if (adapter && typeof adapter.getChatIdFromUrl === 'function') {
+        return adapter.getChatIdFromUrl(url);
+      }
+      return null;
     } catch {
       return null;
     }
@@ -1742,7 +1659,7 @@ const SITE_ADAPTERS = {
 
       // If no text provided, still send a minimal prompt
       const text = (messageText && String(messageText).trim()) ? String(messageText) : '請解析這張圖片。';
-      const result = await sendMessageToGemini(text);
+      const result = await sendMessageToSite(text);
       return result;
     } catch (e) {
       return { success: false, error: e?.message || String(e) };
@@ -1796,32 +1713,27 @@ const SITE_ADAPTERS = {
     isMonitoring = false;
     console.log('[Gemini 分類助手] ✗ 停止監測');
 
-    // 使用 observerManager 統一清理所有受管理的觀察器
+    // 統一清理所有觀察器（包括 titleObserver、messageObserver、imageObserver 及所有動態觀察器）
     try {
       observerManager.disconnectAll();
       console.log('[Gemini 分類助手] [清理] observerManager 已清理所有觀察器');
     } catch (e) {
       console.log('[Gemini 分類助手] [清理] observerManager 清理時發生錯誤（可忽略）:', e.message);
     }
+    titleObserver = null;
+    messageObserver = null;
+    imageObserver = null;
 
-    // 停止標題觀察器（可能未通過 observerManager 管理）
-    if (titleObserver) {
-      try {
-        titleObserver.disconnect();
-      } catch (e) {
-        // 如果觀察器已經失效，忽略錯誤
-        console.log('[Gemini 分類助手] [清理] 觀察器清理時發生錯誤（可忽略）:', e.message);
-      }
-      titleObserver = null;
-      console.log('[Gemini 分類助手] 已停止 MutationObserver');
+    // 統一清理所有定時器（urlCheck、scrapeBackup、forceExtract、recovery 等）
+    try {
+      timerManager.clearAll();
+      console.log('[Gemini 分類助手] [清理] timerManager 已清理所有定時器');
+    } catch (e) {
+      console.log('[Gemini 分類助手] [清理] timerManager 清理時發生錯誤（可忽略）:', e.message);
     }
 
-    // 停止 URL 檢查定時器
-    if (urlCheckInterval) {
-      clearInterval(urlCheckInterval);
-      urlCheckInterval = null;
-      console.log('[Gemini 分類助手] 已停止 URL 檢查定時器');
-    }
+    // 取消防抖的圖片提取
+    debouncedImageExtraction.cancel();
 
     // 恢復 History API 原始方法
     if (_originalPushState) {
@@ -1859,7 +1771,7 @@ const SITE_ADAPTERS = {
       window._geminiInterceptors = null;
     }
 
-    // 使用 eventManager 清理所有受管理的事件監聽器
+    // 統一清理所有事件監聽器
     try {
       eventManager.cleanup();
       console.log('[Gemini 分類助手] [清理] eventManager 已清理所有事件監聽器');
@@ -1871,41 +1783,8 @@ const SITE_ADAPTERS = {
     extractionAttempts = 0;
     lastNotifiedData = null;
 
-    // 停止消息觀察器
-    if (messageObserver) {
-      try {
-        messageObserver.disconnect();
-      } catch (e) {
-        console.log('[Gemini 分類助手] [清理] 消息觀察器清理時發生錯誤（可忽略）:', e.message);
-      }
-      messageObserver = null;
-      console.log('[Gemini 分類助手] 已停止消息觀察器');
-    }
-
-    // 停止圖片觀察器（新增）
-    if (imageObserver) {
-      try {
-        imageObserver.disconnect();
-      } catch (e) {
-        console.log('[Gemini 分類助手] [清理] 圖片觀察器清理時發生錯誤（可忽略）:', e.message);
-      }
-      imageObserver = null;
-      console.log('[Gemini 分類助手] 已停止圖片觀察器');
-    }
-
-    // 停止圖片檢查定時器（新增）
-    if (imageCheckInterval) {
-      clearInterval(imageCheckInterval);
-      imageCheckInterval = null;
-      console.log('[Gemini 分類助手] 已停止圖片檢查定時器');
-    }
-
-    // 停止強制提取定時器（新增）
-    stopForceExtractInterval();
-
     // 重置消息記錄狀態
     lastMessageCount = 0;
-    lastImageCount = 0; // 重置圖片計數（新增）
     recordedMessages.clear();
   }
 
@@ -1943,10 +1822,10 @@ const SITE_ADAPTERS = {
       }, 300);
     };
 
-    // 定期檢查 URL（作為主要機制，每 1 秒檢查一次）
-    urlCheckInterval = setInterval(() => {
+    // 定期檢查 URL（作為主要機制，每 3 秒檢查一次）
+    timerManager.setInterval('urlCheck', () => {
       checkURLAndExtractConversation();
-    }, 1000);
+    }, 3000);
 
     console.log('[Gemini 分類助手] ✓ URL 監聽已設置完成');
   }
@@ -1965,9 +1844,11 @@ const SITE_ADAPTERS = {
       const url = window.location.href;
       // console.log('[Gemini 分類助手] [URL檢查] 當前 URL:', url, '(檢查次數:', urlCheckCount, ')'); // 已關閉日誌
 
-      // 檢查是否在 Gemini 網頁上
-      if (!url.includes('gemini.google.com')) {
-        // console.log('[Gemini 分類助手] [URL檢查] ⚠️ 不在 Gemini 網頁上'); // 已關閉日誌
+      // 檢查是否在支援的站點上（透過 adapter）
+      const __registry = window.__GAPI_SiteRegistry;
+      const __adapter = __registry ? __registry.getCurrentAdapter() : null;
+      const isOnSupportedSite = __adapter ? __adapter.isOnSite(url) : url.includes('gemini.google.com');
+      if (!isOnSupportedSite) {
         if (currentChatId !== null) {
           // console.log('[Gemini 分類助手] [URL檢查] 清除當前對話信息'); // 已關閉日誌
           currentChatId = null;
@@ -1979,50 +1860,44 @@ const SITE_ADAPTERS = {
         return;
       }
 
-      // 檢查 URL 是否包含 /app/ 且後面有對話 ID
-      // Gemini URL 格式可能是:
-      // - https://gemini.google.com/app/{chatId}
-      // - https://gemini.google.com/app/{chatId}?...
-      // - https://gemini.google.com/app (新對話，可能還沒有 chatId)
+      // 檢查 URL 是否包含對話頁面路徑且後面有對話 ID
+      // 透過 adapter 取得站點專用的路徑模式
+      const __appPath = __adapter ? __adapter.appPathPattern : '/app';
       let chatId = null;
-      const appMatch = url.match(/\/app\/([^/?#]+)/);
-      
-      if (appMatch && appMatch[1]) {
-        chatId = appMatch[1];
+
+      // 方法 1: 透過 adapter 從 URL 解析 chatId
+      if (__adapter && typeof __adapter.getChatIdFromUrl === 'function') {
+        chatId = __adapter.getChatIdFromUrl(url);
+      }
+
+      if (chatId) {
         console.log('[Gemini 分類助手] [URL檢查] ✓ 從 URL 找到對話 ID:', chatId);
-      } else if (url.includes('/app')) {
-        // 如果在 /app 頁面但沒有 chatId，嘗試從 DOM 或其他方式檢測
-        console.log('[Gemini 分類助手] [URL檢查] ⚠️ 在 /app 頁面但 URL 中沒有 chatId，嘗試從 DOM 檢測...');
-        
-        // 嘗試從頁面中提取 chatId（例如從數據屬性、localStorage 等）
+      } else if (url.includes(__appPath)) {
+        // 如果在對話頁面但沒有 chatId，嘗試從 DOM 或其他方式檢測
+        console.log('[Gemini 分類助手] [URL檢查] ⚠️ 在對話頁面但 URL 中沒有 chatId，嘗試從 DOM 檢測...');
+
         try {
-          // 方法 1: 從 window.location 的 pathname 中提取
-          const pathMatch = window.location.pathname.match(/\/app\/([^/?#]+)/);
-          if (pathMatch && pathMatch[1]) {
-            chatId = pathMatch[1];
-            console.log('[Gemini 分類助手] [URL檢查] ✓ 從 pathname 找到對話 ID:', chatId);
-          }
-          
-          // 方法 2: 嘗試從頁面數據中提取（如果 Gemini 在頁面中存儲了對話 ID）
-          if (!chatId) {
-            // 檢查是否有對話相關的數據屬性
-            const conversationElement = document.querySelector('[data-conversation-id], [data-chat-id], [data-chatid]');
-            if (conversationElement) {
-              chatId = conversationElement.getAttribute('data-conversation-id') || 
-                       conversationElement.getAttribute('data-chat-id') || 
-                       conversationElement.getAttribute('data-chatid');
-              if (chatId) {
-                console.log('[Gemini 分類助手] [URL檢查] ✓ 從 DOM 元素找到對話 ID:', chatId);
-              }
+          // 方法 2: 透過 adapter 從 pathname 再次嘗試
+          if (!chatId && __adapter && typeof __adapter.getChatIdFromUrl === 'function') {
+            chatId = __adapter.getChatIdFromUrl(window.location.pathname);
+            if (chatId) {
+              console.log('[Gemini 分類助手] [URL檢查] ✓ 從 pathname 找到對話 ID:', chatId);
             }
           }
-          
-          // 方法 3: 如果仍然沒有找到，但頁面上有對話內容，使用臨時 ID
+
+          // 方法 3: 透過 adapter 從 DOM data 屬性提取
+          if (!chatId && __adapter && typeof __adapter.chatIdFromDOM === 'function') {
+            chatId = __adapter.chatIdFromDOM();
+            if (chatId) {
+              console.log('[Gemini 分類助手] [URL檢查] ✓ 從 DOM 元素找到對話 ID:', chatId);
+            }
+          }
+
+          // 方法 4: 如果仍然沒有找到，但頁面上有對話內容，使用臨時 ID
           if (!chatId) {
-            // 檢查頁面上是否有對話消息
-            const hasMessages = document.querySelectorAll('[class*="message"], [class*="user-query"], [class*="model-response"]').length > 0;
+            const __msgSelector = __adapter ? __adapter.hasMessagesSelector : '[class*="message"]';
+            const hasMessages = document.querySelectorAll(__msgSelector).length > 0;
             if (hasMessages) {
-              // 使用基於時間戳的臨時 ID（當 URL 更新時會被替換）
               const tempId = 'temp_' + Date.now();
               console.log('[Gemini 分類助手] [URL檢查] ⚠️ 使用臨時對話 ID:', tempId, '(頁面上有對話內容但 URL 中沒有 ID)');
               chatId = tempId;
@@ -2156,7 +2031,7 @@ const SITE_ADAPTERS = {
         }
       } else {
         // URL 中沒有對話 ID，可能是在主頁面
-        // console.log('[Gemini 分類助手] [URL檢查] ⚠️ URL 中沒有找到 /app/{chatId} 模式'); // 已關閉日誌
+        // console.log('[Gemini 分類助手] [URL檢查] ⚠️ URL 中沒有找到對話 ID 模式'); // 已關閉日誌
         if (currentChatId !== null) {
           // console.log('[Gemini 分類助手] [URL檢查] 離開對話頁面，清除當前對話'); // 已關閉日誌
           currentChatId = null;
@@ -2186,113 +2061,42 @@ const SITE_ADAPTERS = {
       return;
     }
 
-    // 如果已有觀察器，先停止它
-    if (titleObserver) {
-      console.log('[Gemini 分類助手] [MutationObserver] 停止舊的觀察器');
-      titleObserver.disconnect();
+    // observerManager.create 會自動斷開同名舊觀察器
+    if (!document.body) {
+      console.error('[Gemini 分類助手] [MutationObserver] ❌ document.body 不存在，無法設置觀察器');
+      return;
     }
 
-    // 創建新的觀察器（使用 observerManager，如果可用）
-    if (typeof observerManager !== 'undefined' && observerManager && typeof observerManager.create === 'function') {
-      titleObserver = observerManager.create('titleObserver', document.body, (mutations) => {
-        // 檢查 runtime 是否有效，如果無效則停止觀察
-        if (!isRuntimeValid()) {
-          console.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
-          console.warn('[Gemini 分類助手] [MutationObserver] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
-          if (typeof observerManager !== 'undefined' && observerManager) {
-            observerManager.disconnect('titleObserver');
-          }
-          if (titleObserver) {
-            titleObserver.disconnect();
-            titleObserver = null;
-          }
-          return;
-        }
-      
-      // 只有在還沒有標題時才頻繁嘗試
+    titleObserver = observerManager.create('titleObserver', document.body, (mutations) => {
+      if (!isRuntimeValid()) {
+        console.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
+        observerManager.disconnect('titleObserver');
+        titleObserver = null;
+        return;
+      }
+
       if (!currentTitle && extractionAttempts < MAX_EXTRACTION_ATTEMPTS) {
         console.log('[Gemini 分類助手] [MutationObserver] DOM 變化檢測到，嘗試提取標題 (嘗試次數:', extractionAttempts + 1, ')');
         try {
           extractTitle();
         } catch (error) {
-          // 如果提取標題時發生錯誤（可能是 runtime 失效），停止觀察
           const errorMessage = error.message || error.toString();
-          if (errorMessage.includes('Extension context invalidated') || 
+          if (errorMessage.includes('Extension context invalidated') ||
               errorMessage.includes('message port closed')) {
             console.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
-            console.warn('[Gemini 分類助手] [MutationObserver] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
-            if (titleObserver) {
-              titleObserver.disconnect();
-              titleObserver = null;
-            }
-          }
-        }
-      }
-      });
-      
-      // 觀察整個文檔的變化
-      if (document.body) {
-        titleObserver.observe(document.body, {
-          childList: true,
-          subtree: true,
-          characterData: true,
-          attributes: true,
-          attributeFilter: ['class', 'data-testid', 'aria-label']
-        });
-        console.log('[Gemini 分類助手] [MutationObserver] ✓ MutationObserver 已設置，觀察 document.body');
-      } else {
-        console.error('[Gemini 分類助手] [MutationObserver] ❌ document.body 不存在，無法設置觀察器');
-      }
-    } else {
-      // 如果 observerManager 不可用，直接創建 MutationObserver
-      console.warn('[Gemini 分類助手] [MutationObserver] ⚠️ observerManager 不可用，使用直接方式創建觀察器');
-      titleObserver = new MutationObserver((mutations) => {
-        // 檢查 runtime 是否有效，如果無效則停止觀察
-        if (!isRuntimeValid()) {
-          console.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
-          console.warn('[Gemini 分類助手] [MutationObserver] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
-          if (titleObserver) {
-            titleObserver.disconnect();
+            observerManager.disconnect('titleObserver');
             titleObserver = null;
           }
-          return;
         }
-        
-        // 只有在還沒有標題時才頻繁嘗試
-        if (!currentTitle && extractionAttempts < MAX_EXTRACTION_ATTEMPTS) {
-          console.log('[Gemini 分類助手] [MutationObserver] DOM 變化檢測到，嘗試提取標題 (嘗試次數:', extractionAttempts + 1, ')');
-          try {
-            extractTitle();
-          } catch (error) {
-            // 如果提取標題時發生錯誤（可能是 runtime 失效），停止觀察
-            const errorMessage = error.message || error.toString();
-            if (errorMessage.includes('Extension context invalidated') || 
-                errorMessage.includes('message port closed')) {
-              console.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
-              console.warn('[Gemini 分類助手] [MutationObserver] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
-              if (titleObserver) {
-                titleObserver.disconnect();
-                titleObserver = null;
-              }
-            }
-          }
-        }
-      });
-      
-      // 觀察整個文檔的變化
-      if (document.body) {
-        titleObserver.observe(document.body, {
-          childList: true,
-          subtree: true,
-          characterData: true,
-          attributes: true,
-          attributeFilter: ['class', 'data-testid', 'aria-label']
-        });
-        console.log('[Gemini 分類助手] [MutationObserver] ✓ MutationObserver 已設置（直接方式），觀察 document.body');
-      } else {
-        console.error('[Gemini 分類助手] [MutationObserver] ❌ document.body 不存在，無法設置觀察器');
       }
-    }
+    }, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['class', 'data-testid', 'aria-label']
+    });
+    console.log('[Gemini 分類助手] [MutationObserver] ✓ MutationObserver 已設置，觀察 document.body');
   }
 
   // 提取對話標題
@@ -2313,18 +2117,23 @@ const SITE_ADAPTERS = {
       let title = null;
       let foundBy = null;
 
+      // 取得 adapter 以使用站點專用的 selector
+      const __registry = window.__GAPI_SiteRegistry;
+      const __adapter = __registry ? __registry.getCurrentAdapter() : null;
+
       console.log('[Gemini 分類助手] [標題提取] ========== 開始提取標題 (嘗試 #' + extractionAttempts + ') ==========');
       console.log('[Gemini 分類助手] [標題提取] 當前 URL:', window.location.href);
       console.log('[Gemini 分類助手] [標題提取] 當前 ChatId:', currentChatId);
-      
+
       // 調試：輸出頁面結構信息
       if (extractionAttempts === 1) {
+        const __debugLinkSelector = __adapter ? __adapter.sidebarLinkSelector('') : 'a[href]';
         console.log('[Gemini 分類助手] [標題提取] [調試] 頁面結構分析:');
         console.log('[Gemini 分類助手] [標題提取] [調試] - document.title:', document.title);
         console.log('[Gemini 分類助手] [標題提取] [調試] - h1 數量:', document.querySelectorAll('h1').length);
         console.log('[Gemini 分類助手] [標題提取] [調試] - 所有 h1 文本:', Array.from(document.querySelectorAll('h1')).map(h => h.innerText || h.textContent).filter(t => t.trim()));
-        console.log('[Gemini 分類助手] [標題提取] [調試] - 包含 /app/ 的鏈接數量:', document.querySelectorAll('a[href*="/app/"]').length);
-        console.log('[Gemini 分類助手] [標題提取] [調試] - 前 5 個包含 /app/ 的鏈接:', Array.from(document.querySelectorAll('a[href*="/app/"]')).slice(0, 5).map(a => ({
+        console.log('[Gemini 分類助手] [標題提取] [調試] - 對話鏈接數量:', document.querySelectorAll(__debugLinkSelector).length);
+        console.log('[Gemini 分類助手] [標題提取] [調試] - 前 5 個對話鏈接:', Array.from(document.querySelectorAll(__debugLinkSelector)).slice(0, 5).map(a => ({
           href: a.href,
           text: (a.innerText || a.textContent || '').trim().substring(0, 50),
           ariaLabel: a.getAttribute('aria-label') || ''
@@ -2336,14 +2145,9 @@ const SITE_ADAPTERS = {
       try {
         // 策略 0.0: 首先查找側邊欄中當前選中/激活的對話項（最準確）
         console.log('[Gemini 分類助手] [標題提取] 策略 0.0: 查找側邊欄中當前選中的對話項...');
-        const selectedSelectors = [
-          'a[href*="/app/' + currentChatId + '"][aria-current="page"]',
-          'a[href*="/app/' + currentChatId + '"]:has(+ *[aria-selected="true"])',
-          '[aria-selected="true"] a[href*="/app/' + currentChatId + '"]',
-          '[aria-current="page"] a[href*="/app/' + currentChatId + '"]',
-          '[class*="selected"] a[href*="/app/' + currentChatId + '"]',
-          '[class*="active"] a[href*="/app/' + currentChatId + '"]'
-        ];
+        const selectedSelectors = (__adapter && typeof __adapter.selectedItemSelectors === 'function')
+          ? __adapter.selectedItemSelectors(currentChatId)
+          : [];
         
         for (const selector of selectedSelectors) {
           try {
@@ -2382,14 +2186,24 @@ const SITE_ADAPTERS = {
         // 策略 0.1: 精確查找包含當前 chatId 的鏈接
         if (!title) {
           console.log('[Gemini 分類助手] [標題提取] 策略 0.1: 精確查找包含 chatId 的鏈接 (chatId: ' + currentChatId + ')...');
-          const exactLinkSelector = 'a[href*="/app/' + currentChatId + '"]';
+          const exactLinkSelector = (__adapter && typeof __adapter.sidebarLinkSelector === 'function')
+            ? __adapter.sidebarLinkSelector(currentChatId)
+            : 'a[href*="' + currentChatId + '"]';
           const exactLinks = document.querySelectorAll(exactLinkSelector);
           console.log('[Gemini 分類助手] [標題提取] 找到', exactLinks.length, '個精確匹配的鏈接');
           
+          // 構建排除清單（來自 adapter）
+          const __genericPatterns = (__adapter && __adapter.genericTitlePatterns) || [];
+          const __navPatterns = (__adapter && __adapter.navigationTextPatterns) || [];
+          const __allExcluded = [...new Set([...__genericPatterns, ...__navPatterns])];
+          const __excludedRegex = __allExcluded.length > 0
+            ? new RegExp('^(' + __allExcluded.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')$', 'i')
+            : null;
+
           for (const link of exactLinks) {
           // 獲取鏈接的直接文本（不包含子元素）
           let text = '';
-          
+
           // 方法1: 獲取鏈接的直接文本內容（不包含子元素）
           const clonedLink = link.cloneNode(true);
           // 移除所有子元素，只保留文本
@@ -2398,7 +2212,7 @@ const SITE_ADAPTERS = {
             children[i].remove();
           }
           text = clonedLink.textContent || clonedLink.innerText || '';
-          
+
           // 如果直接文本為空，從父元素獲取（但要確保在對話列表區域）
           if (!text || text.trim().length < 3) {
             // 查找最近的列表項或對話項容器
@@ -2412,25 +2226,18 @@ const SITE_ADAPTERS = {
               }
             }
           }
-          
+
           console.log('[Gemini 分類助手] [標題提取] 鏈接文本候選:', text.trim().substring(0, 100));
-          
-          // 排除導航菜單項和通用文本
-          const excludedPatterns = [
-            /^(Gemini|Chat|對話|Conversation|New Chat|Google|新的對話|和 Gemini 的對話|新的|New|Menu|Settings|收合選單|我的內容|我的|內容|Gem|程式夥伴|對話列表|Conversation List|新的對話|New Conversation|開始對話|Start Chat)$/i,
-            /^(我的|內容|選單|Menu|設定|Settings|導航|Navigation)$/i
-          ];
-          
+
           const textTrimmed = text.trim();
-          
+
           // 檢查是否是導航菜單文本（通常是短且常見的導航詞）
-          const isNavigationText = excludedPatterns.some(p => p.test(textTrimmed)) || 
-                                   textTrimmed.length < 5 || 
+          const isNavigationText = (__excludedRegex && __excludedRegex.test(textTrimmed)) ||
+                                   textTrimmed.length < 5 ||
                                    textTrimmed.length > 200;
-          
-          // 額外檢查：如果文本是"我的內容"等，明確排除
-          const excludedTexts = ['我的內容', '我的', '內容', 'Gem', '程式夥伴', '幽默一點', '幽默', '一點'];
-          if (excludedTexts.includes(textTrimmed)) {
+
+          // 額外檢查：如果文本是導航模式文本，明確排除
+          if (__navPatterns.includes(textTrimmed)) {
             console.log('[Gemini 分類助手] [標題提取] 鏈接文本是導航菜單項或通用文本，明確排除:', textTrimmed);
             continue;
           }
@@ -2459,15 +2266,10 @@ const SITE_ADAPTERS = {
         if (!title) {
           console.log('[Gemini 分類助手] [標題提取] 策略 0.2: 從對話列表區域查找...');
           
-          // 查找所有包含 /app/ 的鏈接，但只在對話列表區域
-          const conversationListSelectors = [
-            '[class*="conversation-list"] a[href*="/app/"]',
-            '[class*="chat-list"] a[href*="/app/"]',
-            '[class*="thread-list"] a[href*="/app/"]',
-            '[role="list"] a[href*="/app/"]',
-            'ul[class*="conversation"] a[href*="/app/"]',
-            'div[class*="conversation"] a[href*="/app/"]'
-          ];
+          // 查找對話列表區域的鏈接（透過 adapter 取得 selector）
+          const conversationListSelectors = (__adapter && __adapter.sidebarContainerSelectors)
+            ? __adapter.sidebarContainerSelectors
+            : [];
           
           let foundInListArea = false;
           for (const selector of conversationListSelectors) {
@@ -2496,13 +2298,9 @@ const SITE_ADAPTERS = {
                     }
                   }
                   
-                  const excludedPatterns = [
-                    /^(Gemini|Chat|對話|Conversation|New Chat|Google|新的對話|和 Gemini 的對話|新的|New|Menu|Settings|我的內容|我的|內容|Gem|程式夥伴|幽默一點|幽默|一點)$/i
-                  ];
-                  
                   const textTrimmed = text.trim();
-                  const isNavigationText = excludedPatterns.some(p => p.test(textTrimmed)) || 
-                                           textTrimmed.length < 5 || 
+                  const isNavigationText = (__excludedRegex && __excludedRegex.test(textTrimmed)) ||
+                                           textTrimmed.length < 5 ||
                                            textTrimmed.length > 200;
                   
                   if (!isNavigationText && textTrimmed.length >= 2 && textTrimmed.length <= 300) {
@@ -2521,11 +2319,14 @@ const SITE_ADAPTERS = {
           }
         }
         
-        // 最後備選：查找所有包含 /app/ 的鏈接，但更嚴格地過濾
+        // 最後備選：查找所有對話鏈接，但更嚴格地過濾
         if (!title) {
-          console.log('[Gemini 分類助手] [標題提取] 策略 0.3: 查找所有包含 /app/ 的鏈接（嚴格過濾）...');
-          const allAppLinks = document.querySelectorAll('a[href*="/app/"]');
-          console.log('[Gemini 分類助手] [標題提取] 找到', allAppLinks.length, '個包含 /app/ 的鏈接');
+          const __allLinksSelector = (__adapter && typeof __adapter.sidebarLinkSelector === 'function')
+            ? __adapter.sidebarLinkSelector('')
+            : 'a[href]';
+          console.log('[Gemini 分類助手] [標題提取] 策略 0.3: 查找所有對話鏈接（嚴格過濾）...');
+          const allAppLinks = document.querySelectorAll(__allLinksSelector);
+          console.log('[Gemini 分類助手] [標題提取] 找到', allAppLinks.length, '個對話鏈接');
           
           for (const link of allAppLinks) {
             const href = link.getAttribute('href') || '';
@@ -2546,7 +2347,7 @@ const SITE_ADAPTERS = {
                 if (listItem) {
                   // 檢查是否在導航菜單區域（通常包含"我的內容"等文本）
                   const parentText = listItem.closest('nav, [role="navigation"], [class*="sidebar"], [class*="nav"]')?.innerText || '';
-                  if (parentText.includes('我的內容') || parentText.includes('Gem') || parentText.includes('程式夥伴')) {
+                  if (__navPatterns.some(p => parentText.includes(p))) {
                     // 跳過導航菜單區域
                     console.log('[Gemini 分類助手] [標題提取] 跳過導航菜單區域的鏈接');
                     continue;
@@ -2559,13 +2360,9 @@ const SITE_ADAPTERS = {
               
               const textTrimmed = text.trim();
               
-              // 嚴格過濾：排除導航文本和短文本
-              const excludedPatterns = [
-                /^(我的內容|我的|內容|Gem|程式夥伴|收合選單|Menu|Settings|新的對話|New Conversation|對話|Conversation|Gemini|Chat|Google)$/i
-              ];
-              
-              const isNavigationText = excludedPatterns.some(p => p.test(textTrimmed)) || 
-                                       textTrimmed.length < 5 || 
+              // 嚴格過濾：排除導航文本和短文本（透過 adapter）
+              const isNavigationText = (__excludedRegex && __excludedRegex.test(textTrimmed)) ||
+                                       textTrimmed.length < 5 ||
                                        textTrimmed.length > 200;
               
               if (!isNavigationText && textTrimmed.length >= 5 && textTrimmed.length <= 300) {
@@ -2609,13 +2406,8 @@ const SITE_ADAPTERS = {
               console.log('[Gemini 分類助手] [標題提取] 策略 1 候選:', selector, '=', text.trim().substring(0, 50));
               
               if (text.trim() && text.trim().length > 2) {
-                const excludedPatterns = [
-                  /^(Gemini|Chat|New Chat|對話|Conversation|和 Gemini 的對話)$/i, 
-                  /^Google$/i,
-                  /^(新的對話|New Conversation|開始對話|Start Chat)$/i
-                ];
-                const shouldExclude = excludedPatterns.some(pattern => pattern.test(text.trim()));
-                
+                const shouldExclude = __excludedRegex && __excludedRegex.test(text.trim());
+
                 if (!shouldExclude && text.trim().length > 2 && text.trim().length < 200) {
                   title = text.trim();
                   foundBy = 'main-content-h1 (' + selector + ')';
@@ -2634,20 +2426,14 @@ const SITE_ADAPTERS = {
           console.log('[Gemini 分類助手] [標題提取] 策略 1.1: 查找所有 h1 標籤...');
           const h1Elements = document.querySelectorAll('h1');
           console.log('[Gemini 分類助手] [標題提取] 找到', h1Elements.length, '個 h1 標籤');
-          
+
           for (const h1 of h1Elements) {
             const text = h1.innerText || h1.textContent || '';
             console.log('[Gemini 分類助手] [標題提取] h1 內容:', text.trim().substring(0, 50));
-            
+
             if (text.trim() && text.trim().length > 2) {
-              // 排除通用文本
-              const excludedPatterns = [
-                /^(Gemini|Chat|New Chat|對話|Conversation|和 Gemini 的對話)$/i, 
-                /^Google$/i,
-                /^(新的對話|New Conversation|開始對話|Start Chat)$/i
-              ];
-              const shouldExclude = excludedPatterns.some(pattern => pattern.test(text.trim()));
-              
+              const shouldExclude = __excludedRegex && __excludedRegex.test(text.trim());
+
               if (!shouldExclude && text.trim().length < 200) {
                 title = text.trim();
                 foundBy = 'h1-fallback';
@@ -2672,8 +2458,7 @@ const SITE_ADAPTERS = {
           const mainH1 = mainElement.querySelector('h1');
           if (mainH1) {
             const text = mainH1.innerText || mainH1.textContent || '';
-            const excludedPatterns = [/^(Gemini|Chat|對話|Conversation|New Chat)$/i];
-            if (text.trim() && text.trim().length > 2 && !excludedPatterns.some(p => p.test(text.trim()))) {
+            if (text.trim() && text.trim().length > 2 && !(__excludedRegex && __excludedRegex.test(text.trim()))) {
               title = text.trim();
               foundBy = 'role=main > h1';
               console.log('[Gemini 分類助手] [標題提取] ✓ 策略 2 成功: 從 role="main" > h1 找到標題:', title);
@@ -2743,7 +2528,10 @@ const SITE_ADAPTERS = {
             for (const element of elements) {
               // 關鍵：驗證元素是否屬於當前對話
               // 檢查元素或其父容器是否包含當前 URL 或 chatId
-              const elementContainer = element.closest('[href*="/app/' + currentChatId + '"], a[href*="/app/' + currentChatId + '"]') ||
+              const __closestLinkSel = (__adapter && typeof __adapter.sidebarLinkSelector === 'function')
+                ? __adapter.sidebarLinkSelector(currentChatId)
+                : 'a[href*="' + currentChatId + '"]';
+              const elementContainer = element.closest(__closestLinkSel) ||
                                       element.closest('[data-chat-id="' + currentChatId + '"]') ||
                                       element.closest('[class*="' + currentChatId + '"]');
               
@@ -2759,8 +2547,7 @@ const SITE_ADAPTERS = {
               if (navParent) {
                 const navText = navParent.innerText || navParent.textContent || '';
                 // 如果包含導航菜單關鍵詞且不在對話列表中，跳過
-                if ((navText.includes('我的內容') || navText.includes('Gem') || navText.includes('程式夥伴') || 
-                    navText.includes('收合選單') || navText.includes('Menu') || navText.includes('Settings')) &&
+                if (__navPatterns.some(p => navText.includes(p)) &&
                     !element.closest('[class*="conversation"], [class*="chat"], [class*="thread"], [role="list"]')) {
                   console.log('[Gemini 分類助手] [標題提取] 選擇器', selector, '在導航菜單區域，跳過');
                   continue;
@@ -2779,12 +2566,7 @@ const SITE_ADAPTERS = {
               
               console.log('[Gemini 分類助手] [標題提取] 選擇器', selector, '找到內容:', textTrimmed.substring(0, 50), '(屬於當前對話:', !!elementContainer, ', 在主內容區:', isInMainContent, ')');
               
-              const excludedPatterns = [
-                /^(Gemini|Chat|對話|Conversation|New Chat|Google|新的對話|和 Gemini 的對話|我的內容|我的|內容|Gem|程式夥伴|收合選單|Menu|Settings|新的|New)$/i,
-                /^(我的|內容|選單|設定|導航|Navigation)$/i
-              ];
-              
-              const isNavigationText = excludedPatterns.some(p => p.test(textTrimmed));
+              const isNavigationText = __excludedRegex && __excludedRegex.test(textTrimmed);
               
               // 如果元素屬於當前對話或主內容區域，更寬鬆地接受（允許短標題）
               if (elementContainer || isInMainContent) {
@@ -2828,14 +2610,13 @@ const SITE_ADAPTERS = {
         // 嘗試多種格式
         let pageTitle = document.title;
         
-        // 移除 "- Gemini" 或類似的後綴
-        pageTitle = pageTitle.replace(/\s*[-–—]\s*Gemini.*$/i, '');
-        pageTitle = pageTitle.replace(/\s*[-–—]\s*Google.*$/i, '');
-        pageTitle = pageTitle.replace(/\s*\|\s*Gemini.*$/i, '');
+        // 移除站點名稱後綴（透過 adapter genericTitlePatterns 建構）
+        for (const gp of __genericPatterns) {
+          pageTitle = pageTitle.replace(new RegExp('\\s*[-–—|]\\s*' + gp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '.*$', 'i'), '');
+        }
         pageTitle = pageTitle.trim();
-        
-        const excludedTitlePatterns = [/^(Gemini|Chat|對話|Conversation|Google)$/i];
-        if (pageTitle && pageTitle.length > 2 && !excludedTitlePatterns.some(p => p.test(pageTitle))) {
+
+        if (pageTitle && pageTitle.length > 2 && !(__excludedRegex && __excludedRegex.test(pageTitle))) {
           title = pageTitle;
           foundBy = 'document.title';
           console.log('[Gemini 分類助手] [標題提取] ✓ 策略 4 成功: 從 document.title 找到標題:', title);
@@ -2856,8 +2637,7 @@ const SITE_ADAPTERS = {
             const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 2);
             
             for (const line of lines) {
-              const excludedPatterns = [/^(Gemini|Chat|對話|Conversation|New Chat|Google|Menu|Settings|新的對話)$/i];
-              if (!excludedPatterns.some(p => p.test(line)) && line.length > 2 && line.length < 100) {
+              if (!(__excludedRegex && __excludedRegex.test(line)) && line.length > 2 && line.length < 100) {
                 title = line;
                 foundBy = 'top-container';
                 console.log('[Gemini 分類助手] [標題提取] ✓ 策略 5 成功: 從頂部容器找到標題:', title);
@@ -2891,10 +2671,9 @@ const SITE_ADAPTERS = {
             const elements = document.querySelectorAll(selector);
             for (const element of elements) {
               const text = element.innerText || element.textContent || element.getAttribute('aria-label') || '';
-              const excludedPatterns = [/^(Gemini|Chat|對話|Conversation|New Chat|Google)$/i];
-              
-              if (text.trim() && text.trim().length > 2 && 
-                  !excludedPatterns.some(p => p.test(text.trim())) && 
+
+              if (text.trim() && text.trim().length > 2 &&
+                  !(__excludedRegex && __excludedRegex.test(text.trim())) &&
                   text.trim().length < 200) {
                 title = text.trim();
                 foundBy = selector;
@@ -2935,10 +2714,9 @@ const SITE_ADAPTERS = {
               
               // 只取第一行（標題通常在列表項的第一行）
               const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 2);
-              const excludedPatterns = [/^(Gemini|Chat|對話|Conversation|New Chat|Google|新的對話|和 Gemini 的對話|新的|New)$/i];
-              
+
               for (const line of lines) {
-                if (line.length > 2 && !excludedPatterns.some(p => p.test(line)) && line.length < 200) {
+                if (line.length > 2 && !(__excludedRegex && __excludedRegex.test(line)) && line.length < 200) {
                   title = line;
                   foundBy = 'sidebar-selected';
                   console.log('[Gemini 分類助手] [標題提取] ✓ 策略 7.1 成功: 從側邊欄選中項找到標題:', title);
@@ -2954,24 +2732,13 @@ const SITE_ADAPTERS = {
       }
 
       // 處理提取結果
-      // 如果找到標題，但標題是通用文本或導航菜單項，視為未找到
-      const genericTitles = [
-        '對話', 'Conversation', '和 Gemini 的對話', 'Google Gemini', 
-        'Chat', 'New Chat', 'Gemini', 'Google', '新的對話', 'New Conversation',
-        '我的內容', '我的', '內容', 'Gem', '程式夥伴', '收合選單',
-        'Menu', 'Settings', '設定', '導航', 'Navigation',
-        '幽默一點', '幽默', '一點' // 添加更多可能的通用文本
-      ];
-      
+      // 如果找到標題，但標題是通用文本或導航菜單項，視為未找到（透過 adapter）
       if (title) {
         const titleTrimmed = title.trim();
         const titleLower = titleTrimmed.toLowerCase();
-        const isGeneric = genericTitles.some(generic => 
-          titleLower === generic.toLowerCase() || 
-          titleLower.startsWith(generic.toLowerCase() + ' ') ||
-          titleLower === '我的內容' || 
-          titleLower === '我的' ||
-          titleLower === '內容'
+        const isGeneric = __allExcluded.some(generic =>
+          titleLower === generic.toLowerCase() ||
+          titleLower.startsWith(generic.toLowerCase() + ' ')
         );
         
         // 根據提取方式決定最小長度要求
@@ -3017,14 +2784,7 @@ const SITE_ADAPTERS = {
         try {
           // 使用同步方式獲取（通過發送消息到 background）
           // 但這裡我們先檢查提取的標題是否是通用文本
-          const genericTitles = [
-            '對話', 'Conversation', '和 Gemini 的對話', 'Google Gemini', 
-            'Chat', 'New Chat', 'Gemini', 'Google', '新的對話', 'New Conversation',
-            '我的內容', '我的', '內容', 'Gem', '程式夥伴', '收合選單',
-            'Menu', 'Settings', '設定', '導航', 'Navigation', '幽默一點', '幽默', '一點'
-          ];
-          
-          const isExtractedTitleGeneric = genericTitles.some(g => title.toLowerCase() === g.toLowerCase());
+          const isExtractedTitleGeneric = __allExcluded.some(g => title.toLowerCase() === g.toLowerCase());
           
           // 如果提取的標題是通用文本，標記為需要從存儲獲取
           if (isExtractedTitleGeneric) {
@@ -3064,14 +2824,7 @@ const SITE_ADAPTERS = {
             
             if (savedConversation && savedConversation.title) {
               const savedTitle = savedConversation.title.trim();
-              const genericTitles = [
-                '對話', 'Conversation', '和 Gemini 的對話', 'Google Gemini', 
-                'Chat', 'New Chat', 'Gemini', 'Google', '新的對話', 'New Conversation',
-                '我的內容', '我的', '內容', 'Gem', '程式夥伴', '收合選單',
-                'Menu', 'Settings', '設定', '導航', 'Navigation', '幽默一點', '幽默', '一點'
-              ];
-              
-              const isGeneric = genericTitles.some(g => savedTitle.toLowerCase() === g.toLowerCase());
+              const isGeneric = __allExcluded.some(g => savedTitle.toLowerCase() === g.toLowerCase());
               if (!isGeneric && savedTitle.length >= 2) {
                 console.log('[Gemini 分類助手] [標題提取] ✓ 從存儲獲取標題:', savedTitle);
                 currentTitle = savedTitle;
@@ -3106,9 +2859,16 @@ const SITE_ADAPTERS = {
 
     try {
       console.log('[Gemini 分類助手] [標題驗證] 開始為 chatId 提取標題:', targetChatId);
-      
-      // 策略：從側邊欄查找包含該 chatId 的鏈接
-      const linkSelector = 'a[href*="/app/' + targetChatId + '"]';
+
+      // 取得 adapter
+      const __registry = window.__GAPI_SiteRegistry;
+      const __adapter = __registry ? __registry.getCurrentAdapter() : null;
+      const __navPatterns = (__adapter && __adapter.navigationTextPatterns) || [];
+
+      // 策略：從側邊欄查找包含該 chatId 的鏈接（透過 adapter）
+      const linkSelector = (__adapter && typeof __adapter.sidebarLinkSelector === 'function')
+        ? __adapter.sidebarLinkSelector(targetChatId)
+        : 'a[href*="' + targetChatId + '"]';
       const links = document.querySelectorAll(linkSelector);
       console.log('[Gemini 分類助手] [標題驗證] 找到', links.length, '個包含該 chatId 的鏈接');
       
@@ -3163,10 +2923,7 @@ const SITE_ADAPTERS = {
           }
           
           // 如果不在對話列表區域，但也不是明顯的導航文本，也接受
-          const obviousNavigationTexts = ['我的內容', '我的', '內容', 'Gem', '程式夥伴', 
-                                          'Menu', 'Settings', '設定', '選單', '導航', 'Navigation',
-                                          '對話列表', 'Conversation List', '收合選單'];
-          if (obviousNavigationTexts.indexOf(textTrimmed) === -1) {
+          if (__navPatterns.indexOf(textTrimmed) === -1) {
             console.log('[Gemini 分類助手] [標題驗證] ✓ 提取標題（不在對話列表中但匹配 chatId）:', textTrimmed);
             return textTrimmed;
           }
@@ -3292,49 +3049,47 @@ const SITE_ADAPTERS = {
       console.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，延遲設置監控...');
       console.warn('[Gemini 分類助手] [消息監測] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
       // 設置定期檢查，當上下文恢復時自動重新設置
-      const checkInterval = setInterval(() => {
+      timerManager.setInterval('msgRecovery', () => {
+        if (!isMonitoring) return;
         if (isRuntimeValid()) {
           console.log('[Gemini 分類助手] [消息監測] ✓ 擴展上下文已恢復，重新設置監控');
-          clearInterval(checkInterval);
+          timerManager.clear('msgRecovery');
+          timerManager.clear('msgRecoveryTimeout');
           setupMessageMonitoring();
         }
       }, 1000);
-      
+
       // 30 秒後停止檢查（避免無限循環）
-      setTimeout(() => {
-        clearInterval(checkInterval);
+      timerManager.setTimeout('msgRecoveryTimeout', () => {
+        timerManager.clear('msgRecovery');
       }, 30000);
       return;
     }
 
-    // 如果已有觀察器，先停止它
-    if (messageObserver) {
-      console.log('[Gemini 分類助手] [消息監測] 停止舊的觀察器');
-      messageObserver.disconnect();
-    }
+    // 如果已有觀察器，先停止它（observerManager.create 會自動斷開同名觀察器）
 
-    // 創建新的觀察器
-    messageObserver = new MutationObserver((mutations) => {
+    // 創建新的觀察器（通過 observerManager 管理）
+    const messageObserverCallback = (mutations) => {
       // 檢查 runtime 是否有效
       if (!isRuntimeValid()) {
         console.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，停止觀察');
         console.warn('[Gemini 分類助手] [消息監測] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
-        if (messageObserver) {
-          messageObserver.disconnect();
-          messageObserver = null;
-        }
+        observerManager.disconnect('messageObserver');
+        messageObserver = null;
         // 嘗試自動恢復（當上下文恢復時）
-        const recoveryInterval = setInterval(() => {
+        timerManager.setInterval('msgCallbackRecovery', () => {
+          if (!isMonitoring) return;
           if (isRuntimeValid()) {
             console.log('[Gemini 分類助手] [消息監測] ✓ 擴展上下文已恢復，重新設置監控');
-            clearInterval(recoveryInterval);
+            timerManager.clear('msgCallbackRecovery');
+            timerManager.clear('msgCallbackRecoveryTimeout');
             setupMessageMonitoring();
           }
         }, 2000);
-        
+
         // 30 秒後停止恢復嘗試
-        setTimeout(() => {
-          clearInterval(recoveryInterval);
+        timerManager.setTimeout('msgCallbackRecoveryTimeout', () => {
+          timerManager.clear('msgCallbackRecovery');
         }, 30000);
         return;
       }
@@ -3429,16 +3184,17 @@ const SITE_ADAPTERS = {
                     // 立即檢查一次
                     checkImageLoaded();
                     
-                    // 監聽類名變化
-                    const classObserver = new MutationObserver((mutations) => {
+                    // 監聽類名變化（通過 observerManager 管理）
+                    const imgClassName = nextObserverName('imgClass');
+                    observerManager.create(imgClassName, img, (mutations) => {
                       mutations.forEach(mut => {
                         if (mut.attributeName === 'class') {
                           checkImageLoaded();
                         }
                       });
-                    });
-                    
-                    classObserver.observe(img, {
+                    }, {
+                      childList: false,
+                      subtree: false,
                       attributes: true,
                       attributeFilter: ['class']
                     });
@@ -3520,19 +3276,17 @@ const SITE_ADAPTERS = {
         if (errorMessage.includes('Extension context invalidated') || 
             errorMessage.includes('message port closed')) {
           console.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，停止觀察');
-          if (messageObserver) {
-            messageObserver.disconnect();
-            messageObserver = null;
-          }
+          observerManager.disconnect('messageObserver');
+          messageObserver = null;
         } else {
           console.error('[Gemini 分類助手] [消息監測] 檢測消息變化時發生錯誤:', error);
         }
       }
-    });
-        
-    // 觀察整個文檔的變化（包括圖片加載）
+    };
+
+    // 通過 observerManager 創建並觀察（自動管理生命週期）
     if (document.body) {
-          messageObserver.observe(document.body, {
+          messageObserver = observerManager.create('messageObserver', document.body, messageObserverCallback, {
             childList: true,
             subtree: true,
             characterData: true,
@@ -3557,7 +3311,8 @@ const SITE_ADAPTERS = {
       }
       
       // 定期提取（每 5 秒一次，作為備用，使用 requestIdleCallback 避免阻塞）
-      setInterval(() => {
+      timerManager.setInterval('scrapeBackup', () => {
+        if (!isMonitoring) return;
         if (currentChatId && isRuntimeValid()) {
           if (window.requestIdleCallback) {
             requestIdleCallback(() => {
@@ -3583,7 +3338,7 @@ const SITE_ADAPTERS = {
     try {
       console.log('[Gemini 分類助手] [圖片追蹤] 🔥 暴力模式：設置圖片容器監控...');
       
-      // 1. 【無視 ID 限制】直接生成 requestId，不等待 BardVeMetadataKey
+      // 1. 【無視 ID 限制】直接生成 requestId，不等待生成圖片元數據
       const requestId = 'img_' + Date.now();
       
       // 2. 【鎖定 button.image-button】查找 button.image-button 內的 img
@@ -3618,10 +3373,11 @@ const SITE_ADAPTERS = {
       }
       
       // 4. 【監控類名變化】創建 MutationObserver 監聽 class 和 src 變化
-      const observer = new MutationObserver(async (mutations) => {
-        mutations.forEach(async (mutation) => {
+      const imgSetupName = nextObserverName('imgSetup');
+      observerManager.create(imgSetupName, img, async (mutations) => {
+        for (const mutation of mutations) {
           const target = mutation.target;
-          
+
           // 【效能優化】只要偵測到圖片已在資料庫中，立即停止對該 DOM 節點的所有監聽器
           if (mutation.attributeName === 'src' && target === img) {
             const currentSrc = img.src || '';
@@ -3629,95 +3385,82 @@ const SITE_ADAPTERS = {
               const checkResult = await checkDownloadHistory(currentSrc, requestId, currentChatId);
               if (checkResult.exists) {
                 console.log('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
-                observer.disconnect();
+                observerManager.disconnect(imgSetupName);
                 return;
               }
             }
           }
-          
+
           // 【監控類名變化】只要 img 類名變更為包含 loaded，強行提取
           if (mutation.attributeName === 'class' && target === img) {
             const className = img.className || '';
             if (className.includes('loaded')) {
               console.log('[Gemini 分類助手] [圖片追蹤]   🔥 檢測到類名包含 loaded，強行提取！');
               const newSrc = img.src || '';
-              
-              // 【效能優化】檢查圖片是否已在資料庫中
+
               const checkResult = await checkDownloadHistory(newSrc, requestId, currentChatId);
               if (checkResult.exists) {
                 console.log('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
-                observer.disconnect();
+                observerManager.disconnect(imgSetupName);
                 return;
               }
-              
-              // 【跳過佔位符】寫死規則
-              if (newSrc && newSrc.length >= 100 && 
-                  !newSrc.includes('/profile/picture/') && 
+
+              if (newSrc && newSrc.length >= 100 &&
+                  !newSrc.includes('/profile/picture/') &&
                   !newSrc.includes('profile/picture') &&
-                  (newSrc.includes('lh3.googleusercontent.com') || 
-                   newSrc.includes('googleusercontent.com') || 
+                  (newSrc.includes('lh3.googleusercontent.com') ||
+                   newSrc.includes('googleusercontent.com') ||
                    (newSrc.startsWith('blob:') && !newSrc.startsWith('blob:null/')))) {
                 console.log('[Gemini 分類助手] [圖片追蹤]   ✅ 暴力模式：偵測到有效圖片，立即提取！');
                 console.log('[Gemini 分類助手] [圖片追蹤]   完整 URL:', newSrc.substring(0, 150));
-                
-                // 【即時回傳】立即執行 sendImageToSidePanel
                 sendImageToSidePanel(newSrc, requestId, img);
                 triggerAutoDownload(newSrc, requestId);
-                
-                // 下載完成後停止監控
-                observer.disconnect();
+                observerManager.disconnect(imgSetupName);
                 console.log('[Gemini 分類助手] [圖片追蹤]   ✓ 監控已停止（圖片已提取）');
               }
             }
           }
-          
+
           // 【監控 src 變化】同時監聽 src 屬性變化
           if (mutation.attributeName === 'src') {
             const newSrc = img.src || '';
             console.log('[Gemini 分類助手] [圖片追蹤]   📍 src 屬性已變更:', newSrc.substring(0, 100) || '無');
-            
-            // 【效能優化】檢查圖片是否已在資料庫中
+
             if (newSrc && newSrc.length >= 100) {
               const checkResult = await checkDownloadHistory(newSrc, requestId, currentChatId);
               if (checkResult.exists) {
                 console.log('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
-                observer.disconnect();
+                observerManager.disconnect(imgSetupName);
                 return;
               }
             }
-            
-            // 【跳過佔位符】寫死規則
-            if (newSrc && newSrc.length >= 100 && 
-                !newSrc.includes('/profile/picture/') && 
+
+            if (newSrc && newSrc.length >= 100 &&
+                !newSrc.includes('/profile/picture/') &&
                 !newSrc.includes('profile/picture') &&
-                (newSrc.includes('lh3.googleusercontent.com') || 
-                 newSrc.includes('googleusercontent.com') || 
+                (newSrc.includes('lh3.googleusercontent.com') ||
+                 newSrc.includes('googleusercontent.com') ||
                  newSrc.startsWith('blob:'))) {
               console.log('[Gemini 分類助手] [圖片追蹤]   ✅ 暴力模式：偵測到有效圖片 URL，立即提取！');
-              
-              // 【即時回傳】立即執行 sendImageToSidePanel
               sendImageToSidePanel(newSrc, requestId, img);
               triggerAutoDownload(newSrc, requestId);
-              
-              // 下載完成後停止監控
-              observer.disconnect();
+              observerManager.disconnect(imgSetupName);
               console.log('[Gemini 分類助手] [圖片追蹤]   ✓ 監控已停止（圖片已提取）');
             }
           }
-        });
+        }
+      }, {
+        childList: false,
+        subtree: false,
+        attributes: true,
+        attributeFilter: ['src', 'class', 'data-src']
       });
-      
-      // 開始監聽 img 元素的 class 和 src 變化
-      observer.observe(img, { 
-        attributes: true, 
-        attributeFilter: ['src', 'class', 'data-src'] 
-      });
-      
+
       console.log('[Gemini 分類助手] [圖片追蹤]   ✓ MutationObserver 已啟動（監控 class 和 src）...');
-      
+
       // 設置超時（30秒後自動停止監控）
       setTimeout(() => {
-        observer.disconnect();
+        observerManager.disconnect(imgSetupName);
         console.log('[Gemini 分類助手] [圖片追蹤]   ⏱️ 30 秒超時，停止監控');
       }, 30000);
       
@@ -3753,19 +3496,13 @@ const SITE_ADAPTERS = {
     }, 500);
 
     // 如果已有圖片觀察器，先停止它
-    if (typeof observerManager !== 'undefined' && observerManager && observerManager.has('imageObserver')) {
-      console.log('[Gemini 分類助手] [圖片監控] 停止舊的圖片觀察器');
-      observerManager.disconnect('imageObserver');
-    } else if (imageObserver) {
-      // 如果 observerManager 不可用，直接斷開 imageObserver
-      console.log('[Gemini 分類助手] [圖片監控] 停止舊的圖片觀察器（直接方式）');
-      imageObserver.disconnect();
-      imageObserver = null;
+    // observerManager.create 會自動斷開同名舊觀察器
+    if (!document.body) {
+      console.error('[Gemini 分類助手] [圖片監控] ❌ document.body 不存在，無法設置觀察器');
+      return;
     }
 
-    // 創建新的圖片觀察器（使用 observerManager，如果可用）
-    if (typeof observerManager !== 'undefined' && observerManager && typeof observerManager.create === 'function') {
-      imageObserver = observerManager.create('imageObserver', document.body, (mutations) => {
+    imageObserver = observerManager.create('imageObserver', document.body, (mutations) => {
       // 檢查 runtime 是否有效
       if (!isRuntimeValid()) {
         console.warn('[Gemini 分類助手] [圖片監控] ⚠️ 擴展上下文已失效，停止觀察');
@@ -3897,295 +3634,18 @@ const SITE_ADAPTERS = {
         }
       });
       
-      // 如果有圖片變化，延遲觸發提取（等待圖片完全加載）
+      // 如果有圖片變化，使用防抖延遲觸發提取（等待圖片完全加載）
       if (hasImageChanges) {
-        // 清除之前的定時器
-        if (scrapeTimeout) {
-          clearTimeout(scrapeTimeout);
-        }
-        
-        // 延遲 1.5 秒後提取（給圖片足夠的時間加載），使用異步方式避免阻塞
-        scrapeTimeout = setTimeout(() => {
-          console.log('[Gemini 分類助手] [圖片監控] 觸發圖片提取（檢測到圖片變化）');
-          if (isRuntimeValid() && currentChatId) {
-            // 使用異步方式執行，避免阻塞主線程
-            if (window.requestIdleCallback) {
-              requestIdleCallback(() => {
-                if (isRuntimeValid() && currentChatId) {
-                  scrapeMessages();
-                  extractGeneratedImages();
-                }
-              }, { timeout: 500 });
-            } else {
-              // 降級到 setTimeout，使用較短的延遲分批執行
-              setTimeout(() => {
-                if (isRuntimeValid() && currentChatId) {
-                  scrapeMessages();
-                  extractGeneratedImages();
-                }
-              }, 0);
-            }
-            
-            // 額外等待後再次檢查（給圖片更多時間加載）
-            setTimeout(() => {
-              if (isRuntimeValid() && currentChatId) {
-                if (window.requestIdleCallback) {
-                  requestIdleCallback(() => {
-                    if (isRuntimeValid() && currentChatId) {
-                      scrapeMessages();
-                      extractGeneratedImages();
-                    }
-                  }, { timeout: 500 });
-                } else {
-                  setTimeout(() => {
-                    if (isRuntimeValid() && currentChatId) {
-                      scrapeMessages();
-                      extractGeneratedImages();
-                    }
-                  }, 0);
-                }
-              }
-            }, 2000);
-          }
-          scrapeTimeout = null;
-        }, 1500);
+        debouncedImageExtraction();
       }
+      }, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src', 'data-src', 'data-original', 'class', 'href', 'aria-label']
       });
-      
-      // 觀察整個文檔的圖片相關變化
-      if (document.body) {
-        imageObserver.observe(document.body, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['src', 'data-src', 'data-original', 'class', 'href', 'aria-label']
-        });
-        console.log('[Gemini 分類助手] [圖片追蹤] ✓ 圖片觀察器已設置');
-      }
-    } else {
-      // 如果 observerManager 不可用，直接創建 MutationObserver
-      console.warn('[Gemini 分類助手] [圖片監控] ⚠️ observerManager 不可用，使用直接方式創建觀察器');
-      imageObserver = new MutationObserver((mutations) => {
-        // 檢查 runtime 是否有效
-        if (!isRuntimeValid()) {
-          console.warn('[Gemini 分類助手] [圖片監控] ⚠️ 擴展上下文已失效，停止觀察');
-          if (imageObserver) {
-            imageObserver.disconnect();
-            imageObserver = null;
-          }
-          return;
-        }
-        
-        let hasImageChanges = false;
-        
-        mutations.forEach(mutation => {
-          // 檢查是否有新的圖片元素添加
-          if (mutation.addedNodes && mutation.addedNodes.length > 0) {
-            mutation.addedNodes.forEach(node => {
-              if (node.nodeType === 1) {
-                // 優先檢查是否是 .attachment-container.generated-images 容器
-                let imageContainer = null;
-                
-                if (node.classList?.contains('attachment-container') && node.classList?.contains('generated-images')) {
-                  imageContainer = node;
-                } else if (node.querySelector) {
-                  imageContainer = node.querySelector('.attachment-container.generated-images');
-                }
-                
-                if (imageContainer) {
-                  // console.log('[Gemini 分類助手] [圖片追蹤] 🎯 檢測到新的 .attachment-container.generated-images，立即設置監控'); // 已禁用，避免大量日誌
-                  hasImageChanges = true;
-                  setTimeout(() => {
-                    setupImageObserver(imageContainer);
-                  }, 100);
-                }
-                
-                // 檢查是否是 button.image-button
-                let imgNodeClassName = typeof node.className === 'string' 
-                  ? node.className 
-                  : (node.className?.baseVal || node.className?.toString() || '');
-                
-                if (node.tagName === 'BUTTON' && (imgNodeClassName.includes('image-button') || imgNodeClassName.includes('image'))) {
-                  hasImageChanges = true;
-                  // console.log('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到新的 button.image-button，立即設置監控'); // 已禁用，避免大量日誌
-                  setTimeout(() => {
-                    setupImageObserver(node);
-                  }, 100);
-                }
-                
-                // 檢查其他圖片相關元素
-                imgNodeClassName = typeof node.className === 'string' 
-                  ? node.className 
-                  : (node.className?.baseVal || node.className?.toString() || '');
-                
-                if (node.tagName === 'IMG' || 
-                    node.tagName === 'A' && (node.getAttribute('download') || node.href?.includes('googleusercontent.com')) ||
-                    node.querySelector('img') || 
-                    node.querySelector('button.image-button') ||
-                    imgNodeClassName.includes('image-expansion-dialog') ||
-                    imgNodeClassName.includes('expansion-dialog') ||
-                    node.getAttribute('aria-label')?.includes('顯示大圖') ||
-                    node.getAttribute('aria-label')?.includes('燈箱')) {
-                  hasImageChanges = true;
-                  // console.log('[Gemini 分類助手] [圖片追蹤] 檢測到新的圖片相關元素:', node.tagName, imgNodeClassName.substring(0, 50)); // 已禁用，避免大量日誌
-                }
-              }
-            });
-          }
-          
-          // 檢查圖片屬性變化
-          if (mutation.type === 'attributes' && mutation.target.tagName === 'IMG') {
-            const img = mutation.target;
-            const imgClasses = img.className || '';
-            const imgSrc = img.src || '';
-            
-            if (mutation.attributeName === 'class' && imgClasses.includes('loaded')) {
-              hasImageChanges = true;
-              // console.log('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到圖片類名變更為 loaded，強行提取！'); // 已禁用，避免大量日誌
-              
-              if (imgSrc && imgSrc.length >= 100 && 
-                  !imgSrc.includes('/profile/picture/') && 
-                  !imgSrc.includes('profile/picture') &&
-                  (imgSrc.includes('lh3.googleusercontent.com') || 
-                   imgSrc.includes('googleusercontent.com') || 
-                   imgSrc.startsWith('blob:'))) {
-                const requestId = 'img_loaded_' + Date.now();
-                // console.log('[Gemini 分類助手] [圖片追蹤]   ✅ 類名變為 loaded，立即提取！'); // 已禁用，避免大量日誌
-                sendImageToSidePanel(imgSrc, requestId, img);
-                triggerAutoDownload(imgSrc, requestId);
-              }
-            }
-            
-            if (mutation.attributeName === 'src' || mutation.attributeName === 'data-src' || mutation.attributeName === 'data-original') {
-              const newSrc = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-              
-              if (newSrc && newSrc.length >= 100 && 
-                  !newSrc.includes('/profile/picture/') && 
-                  !newSrc.includes('profile/picture') &&
-                  (newSrc.includes('lh3.googleusercontent.com') || 
-                   newSrc.includes('googleusercontent.com') || 
-                   (newSrc.startsWith('blob:') && !newSrc.startsWith('blob:null/')))) {
-                hasImageChanges = true;
-                // console.log('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到有效圖片 URL 變化，立即提取！:', newSrc.substring(0, 100)); // 已禁用，避免大量日誌
-                
-                const requestId = 'img_src_' + Date.now();
-                sendImageToSidePanel(newSrc, requestId, img);
-                triggerAutoDownload(newSrc, requestId);
-              }
-            }
-          }
-        });
-        
-        // 如果有圖片變化，延遲觸發提取
-        if (hasImageChanges) {
-          if (scrapeTimeout) {
-            clearTimeout(scrapeTimeout);
-          }
-          
-          scrapeTimeout = setTimeout(() => {
-            console.log('[Gemini 分類助手] [圖片監控] 觸發圖片提取（檢測到圖片變化）');
-            if (isRuntimeValid() && currentChatId) {
-              if (window.requestIdleCallback) {
-                requestIdleCallback(() => {
-                  if (isRuntimeValid() && currentChatId) {
-                    scrapeMessages();
-                    extractGeneratedImages();
-                  }
-                }, { timeout: 500 });
-              } else {
-                setTimeout(() => {
-                  if (isRuntimeValid() && currentChatId) {
-                    scrapeMessages();
-                    extractGeneratedImages();
-                  }
-                }, 0);
-              }
-              
-              setTimeout(() => {
-                if (isRuntimeValid() && currentChatId) {
-                  if (window.requestIdleCallback) {
-                    requestIdleCallback(() => {
-                      if (isRuntimeValid() && currentChatId) {
-                        scrapeMessages();
-                        extractGeneratedImages();
-                      }
-                    }, { timeout: 500 });
-                  } else {
-                    setTimeout(() => {
-                      if (isRuntimeValid() && currentChatId) {
-                        scrapeMessages();
-                        extractGeneratedImages();
-                      }
-                    }, 0);
-                  }
-                }
-              }, 2000);
-            }
-            scrapeTimeout = null;
-          }, 1500);
-        }
-      });
-      
-      // 觀察整個文檔的圖片相關變化
-      if (document.body) {
-        imageObserver.observe(document.body, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['src', 'data-src', 'data-original', 'class', 'href', 'aria-label']
-        });
-        console.log('[Gemini 分類助手] [圖片追蹤] ✓ 圖片觀察器已設置（直接方式）');
-      }
-    }
+      console.log('[Gemini 分類助手] [圖片追蹤] ✓ 圖片觀察器已設置');
     
-    // 定期檢查圖片數量變化（作為備用機制，確保不漏掉任何圖片）
-    if (imageCheckInterval) {
-      clearInterval(imageCheckInterval);
-    }
-    
-    imageCheckInterval = setInterval(() => {
-      if (!isRuntimeValid() || !currentChatId) {
-        if (imageCheckInterval) {
-          clearInterval(imageCheckInterval);
-          imageCheckInterval = null;
-        }
-        return;
-      }
-      
-      // console.log('[Gemini 分類助手] [圖片追蹤] 🔄 定期掃描圖片（每 3 秒）...'); // 已禁用，避免大量日誌
-      
-      // 統計當前頁面上的圖片數量（使用更全面的選擇器）
-      const currentImages = document.querySelectorAll(
-        'button.image-button img, ' +
-        'generated-image img, ' +
-        'single-image img, ' +
-        'img[src*="googleusercontent.com"], ' +
-        'img[src*="gg-dl"], ' +
-        'img[src*="rd-gg-dl"], ' +
-        'img[src*="gg/"], ' +
-        'img[src^="blob:"]'
-      );
-      
-      const currentCount = currentImages.length;
-      
-      if (currentCount !== lastImageCount) {
-        console.log('[Gemini 分類助手] [圖片追蹤] 📊 圖片數量變化:', lastImageCount, '->', currentCount);
-        
-        // 無論數量增加還是減少，都觸發提取（可能圖片已更新）
-        extractGeneratedImages();
-        
-        lastImageCount = currentCount;
-        
-        // 同時觸發消息提取
-        setTimeout(() => {
-          if (isRuntimeValid() && currentChatId) {
-            scrapeMessages();
-          }
-        }, 500);
-      }
-    }, 3000); // 每 3 秒檢查一次
-    
-    console.log('[Gemini 分類助手] [圖片追蹤] ✓ 定期掃描已設置（每 3 秒）');
   }
 
   // 提取純文字（過濾 HTML 標籤）
@@ -4309,9 +3769,11 @@ const SITE_ADAPTERS = {
     return codeBlocks;
   }
 
-  // 提取圖片內容（專門針對 Gemini 生成的圖片）
+  // 提取圖片內容（透過 adapter 取得站點專用的圖片 selector）
   function extractImages(element) {
     const images = [];
+    const __imgRegistry = window.__GAPI_SiteRegistry;
+    const __imgAdapter = __imgRegistry ? __imgRegistry.getCurrentAdapter() : null;
     try {
       console.log('[Gemini 分類助手] [對話提取] 開始提取圖片，元素:', element.tagName, element.className?.substring(0, 100));
       
@@ -4346,8 +3808,8 @@ const SITE_ADAPTERS = {
         'generated-image, ' +
         'single-image, ' +
         'single-image.generated-image, ' +
-        'single-image[class*="generated-image"], ' +
-        '[jslog*="BardVeMetadataKey"]'
+        'single-image[class*="generated-image"]' +
+        (__imgAdapter && __imgAdapter.generatedImageSelector ? ', ' + __imgAdapter.generatedImageSelector : '')
       );
       
       // 特別查找圖片展開對話框（燈箱）中的圖片
@@ -4425,20 +3887,20 @@ const SITE_ADAPTERS = {
                              (containerClassName.includes('image') || 
                               containerClassName.includes('image-button'));
         
-        // 檢查容器是否包含 BardVeMetadataKey（在 jslog 屬性中）
-        const hasBardVeMetadataKey = container.getAttribute('jslog')?.includes('BardVeMetadataKey') || 
+        // 檢查容器是否為生成圖片容器（透過 adapter）
+        const hasGeneratedImageMarker = (__imgAdapter && typeof __imgAdapter.isGeneratedImage === 'function' && __imgAdapter.isGeneratedImage(container)) ||
                                      container.tagName?.toLowerCase() === 'single-image' ||
                                      container.tagName?.toLowerCase() === 'generated-image' ||
-                                     (containerClassName.includes('generated-images') && 
+                                     (containerClassName.includes('generated-images') &&
                                       containerClassName.includes('attachment-container'));
-        
-        if (hasBardVeMetadataKey) {
-          console.log('[Gemini 分類助手] [對話提取] 找到包含 BardVeMetadataKey 的容器:', container.tagName, container.className?.substring(0, 100));
+
+        if (hasGeneratedImageMarker) {
+          console.log('[Gemini 分類助手] [對話提取] 找到生成圖片容器:', container.tagName, container.className?.substring(0, 100));
         }
         
         // 查找容器內的圖片（包括 button 內的圖片）
         // 只提取已加載的圖片（class 包含 "loaded"）
-        // 如果容器包含 BardVeMetadataKey，優先處理（即使圖片未完全加載也要嘗試提取）
+        // 如果容器為生成圖片容器，優先處理（即使圖片未完全加載也要嘗試提取）
         const containerImgs = Array.from(container.querySelectorAll('img')).filter(img => {
           // 獲取圖片 src
           const imgSrc = img.src || img.getAttribute('src') || '';
@@ -4452,9 +3914,9 @@ const SITE_ADAPTERS = {
                           img.complete || 
                           img.naturalWidth > 0;
           
-          // 如果容器包含 BardVeMetadataKey，即使未完全加載也要嘗試提取
-          // 如果容器不包含 BardVeMetadataKey，只提取已加載的圖片
-          if (!hasBardVeMetadataKey && !isLoaded) {
+          // 如果容器為生成圖片容器，即使未完全加載也要嘗試提取
+          // 如果容器不為生成圖片容器，只提取已加載的圖片
+          if (!hasGeneratedImageMarker && !isLoaded) {
             return false;
           }
           
@@ -4467,8 +3929,8 @@ const SITE_ADAPTERS = {
           return !isProfilePicture;
         });
         
-        if (hasBardVeMetadataKey && containerImgs.length > 0) {
-          console.log('[Gemini 分類助手] [對話提取] 在包含 BardVeMetadataKey 的容器中找到', containerImgs.length, '個圖片');
+        if (hasGeneratedImageMarker && containerImgs.length > 0) {
+          console.log('[Gemini 分類助手] [對話提取] 在生成圖片容器中找到', containerImgs.length, '個圖片');
         }
         
         // 深入搜索：在 image-button 內部，檢查是否有 a 標籤（連結）或具有 download 屬性的元素
@@ -4597,10 +4059,10 @@ const SITE_ADAPTERS = {
           'single-image, ' +
           'generated-image, ' +
           'div.attachment-container.generated-images, ' +
-          'div[class*="attachment-container"][class*="generated-images"], ' +
-          '[jslog*="BardVeMetadataKey"]'
+          'div[class*="attachment-container"][class*="generated-images"]' +
+          (__imgAdapter && __imgAdapter.generatedImageSelector ? ', ' + __imgAdapter.generatedImageSelector : '')
         );
-        
+
         // 如果已經在容器中處理過，跳過（除非是明確的生成圖片 URL）
         if (isInGeneratedContainer && !isGeneratedImage) {
           // 已經處理過但不是生成的圖片，跳過
@@ -4655,45 +4117,44 @@ const SITE_ADAPTERS = {
         }
       });
       
-      // 整合至 Side Panel：當成功抓到符合 BardVeMetadataKey 的圖片後，將圖片網址與對話標題一併存入 chrome.storage.local
+      // 整合至 Side Panel：當成功抓到生成圖片後，將圖片網址與對話標題一併存入 chrome.storage.local
       if (uniqueImages.length > 0 && currentChatId) {
-        // 檢查是否有包含 BardVeMetadataKey 的圖片按鈕或容器（包括自定義元素）
-        const imageContainers = element.querySelectorAll(
-          'button[jslog*="BardVeMetadataKey"], ' +
-          'button.image-button[jslog*="BardVeMetadataKey"], ' +
-          '[jslog*="BardVeMetadataKey"], ' +
-          'single-image, ' +
-          'generated-image, ' +
-          'div.attachment-container.generated-images, ' +
+        // 檢查是否有生成圖片容器（包括自定義元素）
+        const __imgDownloadSels = (__imgAdapter && __imgAdapter.imageDownloadSelectors) || [];
+        const __genImgSel = (__imgAdapter && __imgAdapter.generatedImageSelector) || '';
+        const __imgContainerSelectorParts = [
+          'single-image',
+          'generated-image',
+          'div.attachment-container.generated-images',
           'div[class*="attachment-container"][class*="generated-images"]'
-        );
-        
-        // 檢查這些容器中是否有 BardVeMetadataKey
-        let foundBardVeMetadataKey = false;
+        ];
+        if (__genImgSel) __imgContainerSelectorParts.push(__genImgSel);
+        __imgDownloadSels.forEach(s => __imgContainerSelectorParts.push(s));
+
+        const imageContainers = element.querySelectorAll(__imgContainerSelectorParts.join(', '));
+
+        // 檢查這些容器中是否為生成圖片（透過 adapter）
+        let foundGeneratedImage = false;
         imageContainers.forEach(container => {
-          const jslog = container.getAttribute('jslog') || '';
-          if (jslog.includes('BardVeMetadataKey')) {
-            foundBardVeMetadataKey = true;
+          if (__imgAdapter && typeof __imgAdapter.isGeneratedImage === 'function' && __imgAdapter.isGeneratedImage(container)) {
+            foundGeneratedImage = true;
           }
-          // 自定義元素（single-image, generated-image）也視為包含 BardVeMetadataKey
-          if (container.tagName?.toLowerCase() === 'single-image' || 
+          if (container.tagName?.toLowerCase() === 'single-image' ||
               container.tagName?.toLowerCase() === 'generated-image') {
-            foundBardVeMetadataKey = true;
+            foundGeneratedImage = true;
           }
-          // attachment-container generated-images 也視為包含
-          // 安全地獲取 className（可能是字符串或 DOMTokenList）
-          const containerClassName = typeof container.className === 'string' 
-            ? container.className 
+          const containerClassName = typeof container.className === 'string'
+            ? container.className
             : (container.className?.baseVal || container.className?.toString() || '');
-          
-          if (containerClassName.includes('generated-images') && 
+
+          if (containerClassName.includes('generated-images') &&
               containerClassName.includes('attachment-container')) {
-            foundBardVeMetadataKey = true;
+            foundGeneratedImage = true;
           }
         });
-        
-        if (foundBardVeMetadataKey) {
-          console.log('[Gemini 分類助手] [對話提取] 找到包含 BardVeMetadataKey 的圖片容器，保存圖片信息');
+
+        if (foundGeneratedImage) {
+          console.log('[Gemini 分類助手] [對話提取] 找到生成圖片容器，保存圖片信息');
           
           // 獲取當前對話標題
           const conversationTitle = extractTitle() || '未命名對話';
@@ -5051,23 +4512,12 @@ const SITE_ADAPTERS = {
       console.log('[Gemini 分類助手] [對話提取] ========== 開始提取對話記錄 ==========');
       console.log('[Gemini 分類助手] [對話提取] [調試] 頁面結構分析:');
       
-      // 調試：分析頁面中的消息元素
-      const debugSelectors = [
-        '[class*="user-query"]',
-        '[class*="userQuery"]',
-        '[class*="user_query"]',
-        '[class*="user-message"]',
-        '[class*="userMessage"]',
-        '[class*="human"]',
-        '[data-role="user"]',
-        '[class*="model-response"]',
-        '[class*="modelResponse"]',
-        '[class*="model_response"]',
-        '[class*="assistant-message"]',
-        '[class*="assistantMessage"]',
-        '[class*="model"]',
-        '[data-role="model"]',
-        '[data-role="assistant"]',
+      // 調試：分析頁面中的消息元素（從 adapter 讀取）
+      const __scrapeRegistry = window.__GAPI_SiteRegistry;
+      const __scrapeAdapter = __scrapeRegistry ? __scrapeRegistry.getCurrentAdapter() : null;
+      const debugSelectors = (__scrapeAdapter && __scrapeAdapter.debugSelectors) || [
+        '[class*="user-query"]', '[data-role="user"]',
+        '[class*="model-response"]', '[data-role="model"]',
         '[class*="message"]'
       ];
       
@@ -5096,27 +4546,10 @@ const SITE_ADAPTERS = {
       // 記錄提取開始時間，用於估算相對時間
       const extractionStartTime = Date.now();
 
-      // 策略 1: 查找用戶消息（user-query 相關）
+      // 策略 1: 查找用戶消息（selector 從 adapter 讀取）
       console.log('[Gemini 分類助手] [對話提取] 查找用戶消息...');
-      const userMessageSelectors = [
-        // 精確匹配
-        '[class*="user-query"]',
-        '[class*="userQuery"]',
-        '[class*="user_query"]',
-        '[class*="user-message"]',
-        '[class*="userMessage"]',
-        '[class*="human"]',
-        '[data-role="user"]',
-        '[data-message-role="user"]',
-        '[class*="message"][class*="user"]',
-        '[role="article"][class*="user"]',
-        // 通用匹配（嘗試匹配所有可能的用戶消息容器）
-        '[class*="turn"]:has([class*="user"]),',
-        '[class*="turn"]:has([data-role="user"])',
-        '[class*="message-container"]:has([class*="user"])',
-        '[class*="chat-message"]:has([class*="user"])',
-        // 通過文本內容推斷（最後手段）
-        'div[class*="message"]:not([class*="model"]):not([class*="assistant"]):not([class*="system"])'
+      const userMessageSelectors = (__scrapeAdapter && __scrapeAdapter.userMessageSelectors) || [
+        '[class*="user-query"]', '[data-role="user"]', '[class*="user-message"]'
       ];
 
       const userMessages = [];
@@ -5202,33 +4635,10 @@ const SITE_ADAPTERS = {
         }
       }
 
-      // 策略 2: 查找 Gemini 回復（model-response 相關）
-      console.log('[Gemini 分類助手] [對話提取] 查找 Gemini 回復...');
-      const modelResponseSelectors = [
-        // 精確匹配
-        '[class*="model-response"]',
-        '[class*="modelResponse"]',
-        '[class*="model_response"]',
-        '[class*="assistant-message"]',
-        '[class*="assistantMessage"]',
-        '[class*="model"]',
-        '[data-role="model"]',
-        '[data-role="assistant"]',
-        '[data-message-role="model"]',
-        '[data-message-role="assistant"]',
-        '[class*="message"][class*="model"]',
-        '[class*="message"][class*="assistant"]',
-        '[role="article"][class*="model"]',
-        '[role="article"][class*="assistant"]',
-        // 通用匹配（嘗試匹配所有可能的模型回復容器）
-        '[class*="turn"]:has([class*="model"]),',
-        '[class*="turn"]:has([class*="assistant"])',
-        '[class*="turn"]:has([data-role="model"])',
-        '[class*="turn"]:has([data-role="assistant"])',
-        '[class*="message-container"]:has([class*="model"])',
-        '[class*="message-container"]:has([class*="assistant"])',
-        '[class*="chat-message"]:has([class*="model"])',
-        '[class*="chat-message"]:has([class*="assistant"])'
+      // 策略 2: 查找模型回復（selector 從 adapter 讀取）
+      console.log('[Gemini 分類助手] [對話提取] 查找模型回復...');
+      const modelResponseSelectors = (__scrapeAdapter && __scrapeAdapter.modelResponseSelectors) || [
+        '[class*="model-response"]', '[data-role="model"]', '[data-role="assistant"]'
       ];
 
       const modelMessages = [];
@@ -5886,45 +5296,38 @@ const SITE_ADAPTERS = {
     }
   }
   
-  // 啟動強制提取定時器（每 2 秒掃描一次，暴力模式：不論有沒有對話 ID）
+  // 啟動強制提取定時器（每 5 秒掃描一次，暴力模式：不論有沒有對話 ID）
   function startForceExtractInterval() {
     // 避免重複啟動（如果已經在運行，直接返回）
-    if (forceExtractInterval !== null) {
+    if (timerManager.has('forceExtract')) {
       return;
     }
-    
+
     // 只檢查 runtime 是否有效，不檢查對話 ID（暴力模式：看到圖就抓）
     if (!isRuntimeValid()) {
       return;
     }
-    
+
     console.log('[Gemini 分類助手] [強制提取] 🔥 啟動強制提取定時器（每 5 秒掃描一次，暴力模式：不論有沒有對話 ID）');
-    
+
     // 立即執行一次
     forceExtractRealImage();
-    
-    // 【效能優化】降低掃描頻率至每 10 秒一次（避免重複處理）
-    forceExtractInterval = setInterval(() => {
+
+    // 【效能優化】降低掃描頻率至每 5 秒一次（避免重複處理）
+    timerManager.setInterval('forceExtract', () => {
       if (!isRuntimeValid()) {
-        // 如果上下文失效，停止定時器
-        if (forceExtractInterval) {
-          clearInterval(forceExtractInterval);
-          forceExtractInterval = null;
-          console.log('[Gemini 分類助手] [強制提取] ⏹️ 停止強制提取定時器（上下文失效）');
-        }
+        timerManager.clear('forceExtract');
+        console.log('[Gemini 分類助手] [強制提取] ⏹️ 停止強制提取定時器（上下文失效）');
         return;
       }
       forceExtractRealImage();
-    }, 5000); // 從 2000ms 改為 5000ms
+    }, 5000);
   }
-  
+
   // 停止強制提取定時器
   function stopForceExtractInterval() {
-    if (forceExtractInterval) {
-      clearInterval(forceExtractInterval);
-      forceExtractInterval = null;
-      console.log('[Gemini 分類助手] [強制提取] ⏹️ 停止強制提取定時器');
-    }
+    timerManager.clear('forceExtract');
+    console.log('[Gemini 分類助手] [強制提取] ⏹️ 停止強制提取定時器');
   }
   
   // 將圖片轉換為 Base64（破解 CSP 封鎖，不修改原始圖片）
@@ -6047,45 +5450,43 @@ const SITE_ADAPTERS = {
         return;
       }
       
-      // 創建 MutationObserver 監聽 src 變化
-      const observer = new MutationObserver((mutations) => {
+      // 創建 MutationObserver 監聽 src 變化（通過 observerManager 管理）
+      const imgSrcWaitName = nextObserverName('imgSrcWait');
+      observerManager.create(imgSrcWaitName, imgElement, (mutations) => {
         mutations.forEach(mutation => {
-          if (mutation.type === 'attributes' && 
+          if (mutation.type === 'attributes' &&
               (mutation.attributeName === 'src' || mutation.attributeName === 'data-src')) {
             const newSrc = imgElement.src || imgElement.getAttribute('src') || '';
-            
-            // 檢查新 src 是否是有效圖片（不是佔位符）
-            if (newSrc && 
+
+            if (newSrc &&
                 newSrc !== originalSrc &&
-                !newSrc.includes('/profile/') && 
+                !newSrc.includes('/profile/') &&
                 !newSrc.includes('/picture/') &&
                 !newSrc.includes('profile-picture') &&
                 !newSrc.includes('avatar') &&
                 (newSrc.includes('googleusercontent.com') || (newSrc.startsWith('blob:') && !newSrc.startsWith('blob:null/')))) {
               console.log('[Gemini 分類助手] [佔位符監聽] ✓ 檢測到有效圖片 URL:', newSrc.substring(0, 100));
-              observer.disconnect();
+              observerManager.disconnect(imgSrcWaitName);
               resolve(newSrc);
             }
           }
         });
-        
-        // 超時檢查
+
         if (Date.now() - startTime > timeout) {
           console.log('[Gemini 分類助手] [佔位符監聽] ⏱️ 等待超時，使用當前 URL');
-          observer.disconnect();
+          observerManager.disconnect(imgSrcWaitName);
           resolve(imgElement.src || imgElement.getAttribute('src') || originalSrc);
         }
-      });
-      
-      // 開始監聽
-      observer.observe(imgElement, {
+      }, {
+        childList: false,
+        subtree: false,
         attributes: true,
         attributeFilter: ['src', 'data-src', 'data-original', 'data-image-url']
       });
-      
+
       // 設置超時
       setTimeout(() => {
-        observer.disconnect();
+        observerManager.disconnect(imgSrcWaitName);
         const currentSrc = imgElement.src || imgElement.getAttribute('src') || originalSrc;
         console.log('[Gemini 分類助手] [佔位符監聽] ⏱️ 超時結束，當前 URL:', currentSrc.substring(0, 100));
         resolve(currentSrc);
@@ -6113,42 +5514,40 @@ const SITE_ADAPTERS = {
         return;
       }
       
-      // 創建 MutationObserver 監聽 src 變化
-      const observer = new MutationObserver((mutations) => {
+      // 創建 MutationObserver 監聽 src 變化（通過 observerManager 管理）
+      const imgPlaceholderName = nextObserverName('imgPlaceholder');
+      observerManager.create(imgPlaceholderName, imgElement, (mutations) => {
         mutations.forEach(mutation => {
-          if (mutation.type === 'attributes' && 
+          if (mutation.type === 'attributes' &&
               (mutation.attributeName === 'src' || mutation.attributeName === 'data-src')) {
             const newSrc = imgElement.src || imgElement.getAttribute('src') || '';
-            
-            // 檢查新 src 是否是有效圖片（不再包含 profile）
-            if (newSrc && 
+
+            if (newSrc &&
                 newSrc !== originalSrc &&
-                !newSrc.includes('/profile/') && 
+                !newSrc.includes('/profile/') &&
                 !newSrc.includes('/picture/') &&
                 !newSrc.includes('profile-picture') &&
                 !newSrc.includes('avatar') &&
                 (newSrc.includes('googleusercontent.com') || (newSrc.startsWith('blob:') && !newSrc.startsWith('blob:null/')))) {
               console.log('[Gemini 分類助手] [圖片監聽] ✓ 檢測到有效圖片 URL:', newSrc.substring(0, 100));
-              observer.disconnect();
-              
-              // 立即觸發 chrome.runtime.sendMessage 將新網址與 currentMessageId 傳送到 Side Panel
+              observerManager.disconnect(imgPlaceholderName);
+
               sendImageToSidePanel(newSrc, currentMessageId, imgElement);
-              
+
               resolve(newSrc);
             }
           }
         });
-      });
-      
-      // 開始監聽
-      observer.observe(imgElement, {
+      }, {
+        childList: false,
+        subtree: false,
         attributes: true,
         attributeFilter: ['src', 'data-src', 'data-original', 'data-image-url']
       });
-      
+
       // 設置超時（10 秒）
       const timeoutId = setTimeout(() => {
-        observer.disconnect();
+        observerManager.disconnect(imgPlaceholderName);
         const currentSrc = imgElement.src || imgElement.getAttribute('src') || originalSrc;
         console.log('[Gemini 分類助手] [圖片監聽] ⏱️ 10 秒超時，當前 URL:', currentSrc.substring(0, 100));
         
@@ -6170,7 +5569,7 @@ const SITE_ADAPTERS = {
       // 清理函數
       const cleanup = () => {
         clearTimeout(timeoutId);
-        observer.disconnect();
+        observerManager.disconnect(imgPlaceholderName);
       };
       
       // 如果圖片已載入（且不是佔位符），立即清理
@@ -6219,9 +5618,14 @@ const SITE_ADAPTERS = {
       console.log('[Gemini 分類助手] [圖片監控]   ✓ 找到圖片元素');
       console.log('[Gemini 分類助手] [圖片監控]   img.className:', img.className);
       
-      const metadata = container.querySelector('single-image')?.getAttribute('jslog');
-      const requestIdMatch = metadata?.match(/BardVeMetadataKey:\[\["(.*?)",/);
-      const requestId = requestIdMatch ? requestIdMatch[1] : messageId?.replace('message-content-id-', '') || 'unknown';
+      const __monRegistry = window.__GAPI_SiteRegistry;
+      const __monAdapter = __monRegistry ? __monRegistry.getCurrentAdapter() : null;
+      const singleImageEl = container.querySelector('single-image');
+      let requestId = messageId?.replace('message-content-id-', '') || 'unknown';
+      if (singleImageEl && __monAdapter && typeof __monAdapter.extractImageId === 'function') {
+        const extractedId = __monAdapter.extractImageId(singleImageEl);
+        if (extractedId) requestId = extractedId;
+      }
       
       console.log('[Gemini 分類助手] [圖片監控]   ✓ 找到圖片元素');
       console.log('[Gemini 分類助手] [圖片監控]   requestId:', requestId);
@@ -6234,43 +5638,36 @@ const SITE_ADAPTERS = {
         return;
       }
       
-      // 創建 MutationObserver 監聽 src 變化
-      const observer = new MutationObserver((mutations) => {
+      // 創建 MutationObserver 監聽 src 變化（通過 observerManager 管理）
+      const imgLoadName = nextObserverName('imgLoad');
+      observerManager.create(imgLoadName, img, (mutations) => {
         mutations.forEach((mutation) => {
           if (mutation.attributeName === 'src') {
             const currentSrc = img.src;
             console.log('[Gemini 分類助手] [圖片監控]   📍 src 屬性已變更:', currentSrc?.substring(0, 100) || '無');
-            
-            // 排除佔位符，只處理真實圖片 URL
+
             if (currentSrc && !currentSrc.includes('profile/picture') && !currentSrc.includes('/profile/')) {
               console.log('[Gemini 分類助手] [圖片監控]   ✅ 真實圖片已現身！啟動下載程序...');
               console.log('[Gemini 分類助手] [圖片監控]   完整 URL:', currentSrc.substring(0, 150));
-              
-              // 觸發自動下載
               triggerAutoDownload(currentSrc, requestId, null, 'highres', 'observeImageLoading_srcChange');
-              
-              // 同時發送到 Side Panel
               sendImageToSidePanel(currentSrc, messageId || requestId, img);
-              
-              // 下載完就停止監控
-              observer.disconnect();
+              observerManager.disconnect(imgLoadName);
               console.log('[Gemini 分類助手] [圖片監控]   ✓ 監控已停止（圖片已下載）');
             }
           }
         });
+      }, {
+        childList: false,
+        subtree: false,
+        attributes: true,
+        attributeFilter: ['src', 'data-src']
       });
-      
-      // 開始監聽 img 元素的 attributes 變化
-      observer.observe(img, { 
-        attributes: true, 
-        attributeFilter: ['src', 'data-src'] 
-      });
-      
+
       console.log('[Gemini 分類助手] [圖片監控]   ✓ MutationObserver 已啟動，等待圖片載入...');
-      
+
       // 設置超時（30秒後自動停止監控）
       setTimeout(() => {
-        observer.disconnect();
+        observerManager.disconnect(imgLoadName);
         console.log('[Gemini 分類助手] [圖片監控]   ⏱️ 30 秒超時，停止監控');
       }, 30000);
       
@@ -6745,7 +6142,8 @@ const SITE_ADAPTERS = {
       XMLHttpRequest.prototype.open = xhrWrapper;
       
       // 監聽下載菜單的出現（如果點擊後會顯示菜單）
-      const menuObserver = new MutationObserver((mutations) => {
+      const menuInterceptName = nextObserverName('menuIntercept');
+      const menuObserver = observerManager.create(menuInterceptName, document.body, (mutations) => {
         mutations.forEach((mutation) => {
           mutation.addedNodes.forEach((node) => {
             if (node.nodeType === 1) {
@@ -6758,7 +6156,7 @@ const SITE_ADAPTERS = {
                   if (!resolved) {
                     resolved = true;
                     clearTimeout(timeout);
-                    menuObserver.disconnect();
+                    observerManager.disconnect(menuInterceptName);
                     window.fetch = originalFetch;
                     XMLHttpRequest.prototype.open = originalXHROpen;
                     console.log('[Gemini 分類助手] [下載按鈕] ✓ 從菜單中提取到 URL:', href.substring(0, 100));
@@ -6772,7 +6170,7 @@ const SITE_ADAPTERS = {
         });
       });
       
-      menuObserver.observe(document.body, { childList: true, subtree: true });
+      // menuObserver is already observing via observerManager.create
       
       // 執行虛擬點擊
       try {
@@ -6788,7 +6186,7 @@ const SITE_ADAPTERS = {
         if (!resolved) {
           resolved = true;
           clearTimeout(timeout);
-          menuObserver.disconnect();
+          observerManager.disconnect(menuInterceptName);
           window.fetch = originalFetch;
           XMLHttpRequest.prototype.open = originalXHROpen;
           resolve(null);
@@ -7093,7 +6491,7 @@ const SITE_ADAPTERS = {
         // 如果提取失敗，使用原始 URL
       }
       
-      // 8. 生成 ID（不等待 BardVeMetadataKey，直接使用時間戳）
+      // 8. 生成 ID（不等待生成圖片元數據，直接使用時間戳）
       const requestId = 'img_' + Date.now();
 
       console.log('[Gemini 分類助手] [圖片追蹤] ✅ 成功鎖定真實路徑！');
@@ -7413,30 +6811,20 @@ const SITE_ADAPTERS = {
     return { inputs: Array.from(allInputs), sendButtons };
   }
 
-  // 查找 Gemini 輸入框（帶重試機制）
+  // 查找輸入框（帶重試機制，selector 從 adapter 讀取）
   async function findInputElement(maxRetries = 3, retryDelay = 500) {
     console.log('[Gemini 分類助手] [發送消息] 開始查找輸入框 (最大重試次數:', maxRetries, ')');
-    
+
+    const __inputRegistry = window.__GAPI_SiteRegistry;
+    const __inputAdapter = __inputRegistry ? __inputRegistry.getCurrentAdapter() : null;
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       console.log(`[Gemini 分類助手] [發送消息] 嘗試 ${attempt}/${maxRetries}...`);
-      
-      // 優先選擇器：contentEditable 元素（Gemini 主要使用這個）
-      const inputSelectors = [
-        // 精確匹配（優先）
+
+      // selector 從 adapter 讀取
+      const inputSelectors = (__inputAdapter && __inputAdapter.inputSelectors) || [
         'div[contenteditable="true"][role="textbox"]',
-        '[contenteditable="true"][role="textbox"]',
         'div[contenteditable="true"]',
-        // 包含 rich-textarea 相關的元素
-        '[class*="rich-textarea"]',
-        '[class*="richTextarea"]',
-        '[class*="RichTextarea"]',
-        // textarea 備選
-        'textarea[placeholder*="Message"]',
-        'textarea[placeholder*="輸入"]',
-        'textarea[placeholder*="message"]',
-        'textarea[aria-label*="Message"]',
-        'textarea[aria-label*="輸入"]',
-        // 通用選擇器（最後備選）
         'textarea'
       ];
 
@@ -7484,27 +6872,15 @@ const SITE_ADAPTERS = {
     return null;
   }
 
-  // 查找發送按鈕
+  // 查找發送按鈕（selector 從 adapter 讀取）
   function findSendButton(inputElement) {
     console.log('[Gemini 分類助手] [發送消息] 開始查找發送按鈕...');
-    
-    // 優先選擇器（支持中英文）
-    const sendButtonSelectors = [
-      // 精確匹配 aria-label（中英文）
-      'button[aria-label*="Send message"]',
-      'button[aria-label*="傳送訊息"]',
+
+    const __sendRegistry = window.__GAPI_SiteRegistry;
+    const __sendAdapter = __sendRegistry ? __sendRegistry.getCurrentAdapter() : null;
+    const sendButtonSelectors = (__sendAdapter && __sendAdapter.sendButtonSelectors) || [
       'button[aria-label*="Send"]',
-      'button[aria-label*="發送"]',
-      'button[aria-label*="傳送"]',
-      // 通用匹配
-      'button[aria-label*="send"]',
-      'button[aria-label*="Send"]',
-      // 類型匹配
-      'button[type="submit"]',
-      // div 作為按鈕
-      'div[role="button"][aria-label*="Send"]',
-      'div[role="button"][aria-label*="傳送"]',
-      'div[role="button"][aria-label*="發送"]'
+      'button[type="submit"]'
     ];
 
     // 首先在輸入框附近查找
@@ -7559,7 +6935,7 @@ const SITE_ADAPTERS = {
   }
 
   // 發送消息到 Gemini（從側邊欄調用）- 異步函數
-  async function sendMessageToGemini(messageText) {
+  async function sendMessageToSite(messageText) {
     if (!messageText || !messageText.trim()) {
       console.error('[Gemini 分類助手] [發送消息] ❌ 消息內容為空');
       return { success: false, error: '消息內容為空' };
@@ -7610,60 +6986,101 @@ const SITE_ADAPTERS = {
         console.warn('[Gemini 分類助手] [發送消息] 清空內容時發生錯誤:', e.message);
       }
 
-      // 步驟 4: 使用 document.execCommand('insertText') 填入文字（最可靠的方法）
-      console.log('[Gemini 分類助手] [發送消息] 使用 execCommand 填入文字...');
+      // 步驟 4: 逐字輸入文字（模擬真人打字）
+      console.log('[Gemini 分類助手] [發送消息] 開始模擬人類打字...');
       try {
-        // 確保輸入框有焦點
         inputElement.focus();
-        
-        // 使用 document.execCommand('insertText') 模擬真實鍵盤輸入
-        // 這能最有效地觸發前端框架的狀態更新
-        const success = document.execCommand('insertText', false, messageText);
-        
-        if (success) {
-          console.log('[Gemini 分類助手] [發送消息] ✓ execCommand 成功填入文字');
-        } else {
-          console.warn('[Gemini 分類助手] [發送消息] ⚠️ execCommand 返回 false，嘗試備用方法');
-          
-          // 備用方法：如果 execCommand 失敗，使用直接設置（適用於 textarea）
-          if (inputElement.tagName === 'TEXTAREA') {
-            inputElement.value = messageText;
-            // 觸發事件
-            inputElement.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-            inputElement.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-            console.log('[Gemini 分類助手] [發送消息] ✓ 使用備用方法（textarea.value）填入文字');
-          } else if (inputElement.isContentEditable) {
-            // 對於 contentEditable，使用 InputEvent
-            inputElement.textContent = messageText;
-            const inputEvent = new InputEvent('input', {
-              bubbles: true,
-              cancelable: true,
-              inputType: 'insertText',
-              data: messageText
-            });
-            inputElement.dispatchEvent(inputEvent);
-            console.log('[Gemini 分類助手] [發送消息] ✓ 使用備用方法（InputEvent）填入文字');
+
+        // 打字配置從 adapter 讀取
+        const __typingRegistry = window.__GAPI_SiteRegistry;
+        const __typingAdapter = __typingRegistry ? __typingRegistry.getCurrentAdapter() : null;
+        const typingCfg = (__typingAdapter && __typingAdapter.typingConfig) || {};
+        const NEARBY_KEYS = typingCfg.nearbyKeys || {
+          'a':'sq','b':'vn','c':'xv','d':'sf','e':'wr','f':'dg','g':'fh',
+          'h':'gj','i':'uo','j':'hk','k':'jl','l':'k;','m':'n,','n':'bm',
+          'o':'ip','p':'o[','q':'wa','r':'et','s':'ad','t':'ry','u':'yi',
+          'v':'cb','w':'qe','x':'zc','y':'tu','z':'xa',
+          '1':'2','2':'13','3':'24','4':'35','5':'46','6':'57','7':'68','8':'79','9':'80','0':'9'
+        };
+
+        const rand = (min, max) => min + Math.random() * (max - min);
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        const TYPO_RATE = typingCfg.typoRate || 0.05;
+        const PAUSE_AFTER_PUNCT = typingCfg.pauseAfterPunct || [300, 700];
+        const PAUSE_AFTER_SPACE = typingCfg.pauseAfterSpace || [80, 250];
+        const NORMAL_DELAY = typingCfg.normalDelay || [40, 160];
+        const BURST_DELAY = typingCfg.burstDelay || [20, 60];
+
+        let inBurst = false;
+        for (let ci = 0; ci < messageText.length; ci++) {
+          const ch = messageText[ci];
+
+          // --- 偶爾打錯再刪 ---
+          if (TYPO_RATE > Math.random() && ch.match(/[a-zA-Z0-9\u4e00-\u9fff]/)) {
+            const lower = ch.toLowerCase();
+            const neighbors = NEARBY_KEYS[lower];
+            if (neighbors) {
+              const wrong = neighbors[Math.floor(Math.random() * neighbors.length)];
+              document.execCommand('insertText', false, wrong);
+              await sleep(rand(180, 400));   // 注意到打錯
+              // 刪除
+              inputElement.dispatchEvent(new KeyboardEvent('keydown', {key:'Backspace',code:'Backspace',keyCode:8,bubbles:true}));
+              document.execCommand('delete', false);
+              await sleep(rand(80, 200));    // 修正
+            }
+          }
+
+          // --- 打正確的字 ---
+          document.execCommand('insertText', false, ch);
+
+          // --- 決定延遲 ---
+          if ('。！？.!?\n'.includes(ch)) {
+            await sleep(rand(...PAUSE_AFTER_PUNCT));
+            inBurst = false;
+          } else if (ch === ' ' || ch === '，' || ch === ',') {
+            // 空格/逗號後有 30% 機率長停頓（模擬思考下一個詞）
+            if (Math.random() < 0.3) {
+              await sleep(rand(200, 600));
+              inBurst = false;
+            } else {
+              await sleep(rand(...PAUSE_AFTER_SPACE));
+            }
+            // 20% 機率進入快速連打模式
+            if (Math.random() < 0.2) inBurst = true;
+          } else if (inBurst) {
+            await sleep(rand(...BURST_DELAY));
+            // 快速連打持續 3-8 個字後結束
+            if (Math.random() < 0.15) inBurst = false;
+          } else {
+            await sleep(rand(...NORMAL_DELAY));
+            // 10% 機率進入快速連打
+            if (Math.random() < 0.1) inBurst = true;
           }
         }
-        
-        // 驗證文字是否已填入
-        const currentText = inputElement.tagName === 'TEXTAREA' 
-          ? inputElement.value 
+
+        console.log('[Gemini 分類助手] [發送消息] ✓ 模擬打字完成，共', messageText.length, '字符');
+
+        // 驗證
+        const currentText = inputElement.tagName === 'TEXTAREA'
+          ? inputElement.value
           : (inputElement.textContent || inputElement.innerText || '');
-        
-        if (currentText.trim() === messageText.trim()) {
-          console.log('[Gemini 分類助手] [發送消息] ✓ 文字已成功填入（驗證通過）');
-        } else {
-          console.warn('[Gemini 分類助手] [發送消息] ⚠️ 文字填入驗證失敗（當前:', currentText.substring(0, 50), '，預期:', messageText.substring(0, 50), ')');
+        if (currentText.trim() !== messageText.trim()) {
+          console.warn('[Gemini 分類助手] [發送消息] ⚠️ 打字驗證失敗，使用 execCommand 補正');
+          // 清空再一次填入
+          if (inputElement.isContentEditable) {
+            inputElement.textContent = '';
+          }
+          document.execCommand('insertText', false, messageText);
         }
       } catch (e) {
-        console.error('[Gemini 分類助手] [發送消息] ❌ 填入文字時發生錯誤:', e);
-        return { success: false, error: '填入文字失敗: ' + e.message };
+        console.error('[Gemini 分類助手] [發送消息] ❌ 打字時發生錯誤，回退為瞬間填入:', e);
+        inputElement.focus();
+        document.execCommand('insertText', false, messageText);
       }
 
-      // 等待一下確保前端框架已更新狀態（這很重要！）
-      console.log('[Gemini 分類助手] [發送消息] 等待 500ms 讓前端框架更新狀態...');
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // 打完後短暫停頓再按發送（模擬檢查內容）
+      await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 700));
 
       // 步驟 5: 查找並點擊發送按鈕
       console.log('[Gemini 分類助手] [發送消息] 查找發送按鈕...');
@@ -7743,7 +7160,7 @@ const SITE_ADAPTERS = {
   }
   
   // 修復：在異步函數中使用 await
-  // 由於 sendMessageToGemini 需要調用異步操作，我們需要將其改為異步函數
+  // 由於 sendMessageToSite 需要調用異步操作，我們需要將其改為異步函數
 
   // ========== 新增功能：圖片攔截器 ==========
   
@@ -7757,12 +7174,12 @@ const SITE_ADAPTERS = {
     });
     
     // 使用 MutationObserver 監控新的回應區塊
-    const observer = new MutationObserver((mutations) => {
+    const downloadButtonName = nextObserverName('downloadButton');
+    observerManager.create(downloadButtonName, document.body, (mutations) => {
       mutations.forEach((mutation) => {
         if (mutation.addedNodes) {
           mutation.addedNodes.forEach(node => {
             if (node.nodeType === 1) {
-              // 檢查是否是回應區塊
               const isResponseContainer = node.matches && (
                 node.matches('[class*="model-response"]') ||
                 node.matches('[class*="modelResponse"]') ||
@@ -7770,11 +7187,10 @@ const SITE_ADAPTERS = {
                 node.matches('[data-role="model"]') ||
                 node.matches('[data-role="assistant"]')
               );
-              
+
               if (isResponseContainer) {
                 handleNewResponse(node);
               } else {
-                // 檢查子元素中是否有回應區塊
                 const containers = node.querySelectorAll ? node.querySelectorAll('[class*="model-response"], [class*="modelResponse"], [class*="assistant-message"], [data-role="model"], [data-role="assistant"]') : [];
                 containers.forEach(container => {
                   handleNewResponse(container);
@@ -7784,12 +7200,6 @@ const SITE_ADAPTERS = {
           });
         }
       });
-    });
-    
-    // 監控整個文檔
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
     });
   }
   
@@ -7842,9 +7252,11 @@ const SITE_ADAPTERS = {
       return true;
     }
     
-    // 檢查 jslog 中是否包含 BardVeMetadataKey
-    const jslog = element.getAttribute('jslog') || '';
-    if (jslog.includes('BardVeMetadataKey') && (ariaLabel.includes('下載') || ariaLabel.includes('download'))) {
+    // 檢查是否為生成圖片的下載按鈕（透過 adapter）
+    const __dlRegistry = window.__GAPI_SiteRegistry;
+    const __dlAdapter = __dlRegistry ? __dlRegistry.getCurrentAdapter() : null;
+    if (__dlAdapter && typeof __dlAdapter.isGeneratedImage === 'function' && __dlAdapter.isGeneratedImage(element) &&
+        (ariaLabel.includes('下載') || ariaLabel.includes('download'))) {
       return true;
     }
     
@@ -7945,21 +7357,21 @@ const SITE_ADAPTERS = {
       
       if (!img) {
         // 如果找不到圖片，設置一個 MutationObserver 等待圖片出現
-        const imgObserver = new MutationObserver((mutations) => {
+        const imgAutoTriggerName = nextObserverName('imgAutoTrigger');
+        observerManager.create(imgAutoTriggerName, container, (mutations) => {
           mutations.forEach((mutation) => {
             if (mutation.addedNodes) {
               mutation.addedNodes.forEach(node => {
                   if (node.nodeType === 1) {
                     const foundImg = node.querySelector && node.querySelector('img');
                     if (foundImg) {
-                      // className 可能是字符串或 DOMTokenList，需要轉換
-                      const className = typeof foundImg.className === 'string' 
-                        ? foundImg.className 
+                      const className = typeof foundImg.className === 'string'
+                        ? foundImg.className
                         : (foundImg.className?.baseVal || foundImg.className?.toString() || '');
                       if (className && className.includes('loaded')) {
                         console.log('[Gemini 分類助手] [全自動觸發] 🔥 檢測到圖片類名包含 loaded，自動觸發下載按鈕點擊');
                         triggerButtonClick(button);
-                        imgObserver.disconnect();
+                        observerManager.disconnect(imgAutoTriggerName);
                       }
                     }
                   }
@@ -7967,11 +7379,9 @@ const SITE_ADAPTERS = {
             }
           });
         });
-        
-        imgObserver.observe(container, { childList: true, subtree: true });
-        
+
         // 30秒後自動停止監控
-        setTimeout(() => imgObserver.disconnect(), 30000);
+        setTimeout(() => observerManager.disconnect(imgAutoTriggerName), 30000);
         return;
       }
       
@@ -7983,23 +7393,27 @@ const SITE_ADAPTERS = {
       }
       
       // 如果圖片還沒有 loaded 類名，設置 MutationObserver 監聽類名變化
-      const classObserver = new MutationObserver((mutations) => {
+      const imgAutoClassName = nextObserverName('imgAutoClass');
+      observerManager.create(imgAutoClassName, img, (mutations) => {
         mutations.forEach((mutation) => {
           if (mutation.attributeName === 'class' && mutation.target === img) {
             const className = img.className || '';
             if (className.includes('loaded')) {
               console.log('[Gemini 分類助手] [全自動觸發] 🔥 檢測到圖片類名變更為包含 loaded，自動觸發下載按鈕點擊');
               triggerButtonClick(button);
-              classObserver.disconnect();
+              observerManager.disconnect(imgAutoClassName);
             }
           }
         });
+      }, {
+        childList: false,
+        subtree: false,
+        attributes: true,
+        attributeFilter: ['class']
       });
-      
-      classObserver.observe(img, { attributes: true, attributeFilter: ['class'] });
-      
+
       // 30秒後自動停止監控
-      setTimeout(() => classObserver.disconnect(), 30000);
+      setTimeout(() => observerManager.disconnect(imgAutoClassName), 30000);
     } catch (error) {
       console.error('[Gemini 分類助手] [全自動觸發] ❌ 自動觸發下載按鈕時發生錯誤:', error);
     }
@@ -8055,18 +7469,18 @@ const SITE_ADAPTERS = {
       checkButtonState();
       
       // 持續監控 5 秒
-      const stateObserver = new MutationObserver(() => {
+      const btnStateName = nextObserverName('btnState');
+      observerManager.create(btnStateName, button, () => {
         checkButtonState();
-      });
-      stateObserver.observe(button, { 
-        childList: true, 
-        subtree: true, 
+      }, {
+        childList: true,
+        subtree: true,
         attributes: true,
         attributeFilter: ['class']
       });
-      
+
       setTimeout(() => {
-        stateObserver.disconnect();
+        observerManager.disconnect(btnStateName);
       }, 5000);
       
     } catch (error) {
@@ -8270,9 +7684,13 @@ const SITE_ADAPTERS = {
         }
       }
       
-      // 策略 2: 從 BardVeMetadataKey 提取 ID，構建原始圖片 URL
-      if (jslog.includes('BardVeMetadataKey')) {
-        const metadataMatch = jslog.match(/BardVeMetadataKey:\[\["([^"]+)"/);
+      // 策略 2: 從生成圖片元數據提取 ID，構建原始圖片 URL（透過 adapter）
+      const __btnRegistry = window.__GAPI_SiteRegistry;
+      const __btnAdapter = __btnRegistry ? __btnRegistry.getCurrentAdapter() : null;
+      const __btnIsGenImg = __btnAdapter && typeof __btnAdapter.isGeneratedImage === 'function' && __btnAdapter.isGeneratedImage(button);
+      if (__btnIsGenImg) {
+        const __btnImgId = __btnAdapter.extractImageId(button);
+        const metadataMatch = __btnImgId ? [null, __btnImgId] : null;
         if (metadataMatch && metadataMatch[1]) {
           const requestId = metadataMatch[1];
           
@@ -8548,15 +7966,14 @@ const SITE_ADAPTERS = {
     }
   }
   
-  // 從按鈕提取 Request ID
+  // 從按鈕提取 Request ID（透過 adapter）
   function extractRequestIdFromButton(button) {
     try {
-      const jslog = button.getAttribute('jslog') || '';
-      if (jslog.includes('BardVeMetadataKey')) {
-        const metadataMatch = jslog.match(/BardVeMetadataKey:\[\["([^"]+)"/);
-        if (metadataMatch && metadataMatch[1]) {
-          return metadataMatch[1];
-        }
+      const __reqRegistry = window.__GAPI_SiteRegistry;
+      const __reqAdapter = __reqRegistry ? __reqRegistry.getCurrentAdapter() : null;
+      if (__reqAdapter && typeof __reqAdapter.extractImageId === 'function') {
+        const imgId = __reqAdapter.extractImageId(button);
+        if (imgId) return imgId;
       }
     } catch (e) {
       // 忽略錯誤
@@ -8586,10 +8003,15 @@ const SITE_ADAPTERS = {
           console.log(`H1 #${i + 1}:`, h1.innerText || h1.textContent);
         });
         
-        // 分析包含 /app/ 的鏈接
+        // 分析對話鏈接（透過 adapter）
         console.log('\n--- 對話鏈接分析 ---');
-        const links = document.querySelectorAll('a[href*="/app/"]');
-        console.log('包含 /app/ 的鏈接數量:', links.length);
+        const __dbgReg1 = window.__GAPI_SiteRegistry;
+        const __dbgAdp1 = __dbgReg1 ? __dbgReg1.getCurrentAdapter() : null;
+        const __dbgSel1 = (__dbgAdp1 && typeof __dbgAdp1.sidebarLinkSelector === 'function')
+          ? __dbgAdp1.sidebarLinkSelector('')
+          : 'a[href]';
+        const links = document.querySelectorAll(__dbgSel1);
+        console.log('對話鏈接數量:', links.length);
         links.slice(0, 10).forEach((link, i) => {
           console.log(`鏈接 #${i + 1}:`, {
             href: link.href,
@@ -10352,10 +9774,15 @@ if (typeof window !== 'undefined') {
             }
           });
           
-          // 分析包含 /app/ 的鏈接
+          // 分析對話鏈接（透過 adapter）
           console.log('\n--- 對話鏈接分析 ---');
-          const links = document.querySelectorAll('a[href*="/app/"]');
-          console.log('包含 /app/ 的鏈接數量:', links.length);
+          const __dbgReg2 = window.__GAPI_SiteRegistry;
+          const __dbgAdp2 = __dbgReg2 ? __dbgReg2.getCurrentAdapter() : null;
+          const __dbgSel2 = (__dbgAdp2 && typeof __dbgAdp2.sidebarLinkSelector === 'function')
+            ? __dbgAdp2.sidebarLinkSelector('')
+            : 'a[href]';
+          const links = document.querySelectorAll(__dbgSel2);
+          console.log('對話鏈接數量:', links.length);
           links.slice(0, 10).forEach((link, i) => {
             const text = (link.innerText || link.textContent || '').trim();
             if (text.length > 0) {

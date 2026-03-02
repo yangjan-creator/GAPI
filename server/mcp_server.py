@@ -13,7 +13,7 @@ import secrets
 import logging
 import asyncio
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import List, Dict, Optional
 
 from fastapi import (
@@ -55,8 +55,19 @@ ALLOWED_ORIGINS = os.environ.get(
     "http://localhost:5173,chrome-extension://*"
 ).split(",")
 
+# ========== Lifespan ==========
+@asynccontextmanager
+async def lifespan(app):
+    logger.info("GAPI Server v2.0.0 starting")
+    logger.info("DEV_MODE=%s", DEV_MODE)
+    logger.info("CORS origins: %s", ALLOWED_ORIGINS)
+    logger.info("Image dir: %s", IMAGES_DIR)
+    logger.info("Database: %s", DB_PATH)
+    yield
+
+
 # ========== FastAPI App ==========
-app = FastAPI(title="GAPI Server", version="2.0.0")
+app = FastAPI(title="GAPI Server", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -113,6 +124,7 @@ class MessageSend(BaseModel):
     conversation_id: str
     content: str
     attachments: Optional[List[str]] = None
+    role: Optional[str] = "user"
 
 
 class ImageUploadResponse(BaseModel):
@@ -135,6 +147,14 @@ class APIKeyResponse(BaseModel):
     name: str
     created_at: int
     expires_at: Optional[int] = None
+
+
+class SiteConfigCreate(BaseModel):
+    id: Optional[str] = None
+    url_pattern: str
+    name: str
+    selectors: dict
+    enabled: bool = True
 
 
 class BrowserAction(BaseModel):
@@ -253,6 +273,18 @@ class SQLiteStore:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_sessions_extension_id
                 ON sessions(extension_id)
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS site_configs (
+                    id TEXT PRIMARY KEY,
+                    url_pattern TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    selectors TEXT NOT NULL,
+                    enabled INTEGER DEFAULT 1,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                )
             """)
 
             # Migrate: rename api_key column to api_key_hash if needed
@@ -471,6 +503,58 @@ class SQLiteStore:
             )
             return cursor.rowcount > 0
 
+    # ========== Site Config Methods ==========
+    def list_site_configs(self) -> List[dict]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM site_configs ORDER BY created_at DESC"
+            ).fetchall()
+            results = []
+            for row in rows:
+                d = dict(row)
+                try:
+                    d["selectors"] = json.loads(d["selectors"])
+                except (json.JSONDecodeError, TypeError):
+                    d["selectors"] = {}
+                d["enabled"] = bool(d["enabled"])
+                results.append(d)
+            return results
+
+    def upsert_site_config(self, config_id: str, url_pattern: str, name: str,
+                           selectors: dict, enabled: bool = True) -> dict:
+        now = int(time.time() * 1000)
+        selectors_json = json.dumps(selectors)
+        with self._get_connection() as conn:
+            existing = conn.execute(
+                "SELECT created_at FROM site_configs WHERE id = ?", (config_id,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE site_configs SET url_pattern = ?, name = ?, selectors = ?, "
+                    "enabled = ?, updated_at = ? WHERE id = ?",
+                    (url_pattern, name, selectors_json, int(enabled), now, config_id)
+                )
+                created_at = existing["created_at"]
+            else:
+                conn.execute(
+                    "INSERT INTO site_configs (id, url_pattern, name, selectors, enabled, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (config_id, url_pattern, name, selectors_json, int(enabled), now, now)
+                )
+                created_at = now
+        return {
+            "id": config_id, "url_pattern": url_pattern, "name": name,
+            "selectors": selectors, "enabled": enabled,
+            "created_at": created_at, "updated_at": now
+        }
+
+    def delete_site_config(self, config_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM site_configs WHERE id = ?", (config_id,)
+            )
+            return cursor.rowcount > 0
+
 
 # ========== Global Instances ==========
 store = SQLiteStore()
@@ -513,6 +597,7 @@ class WebSocketManager:
                 break
         if ext_to_remove:
             del self.extension_to_session[ext_to_remove]
+            page_registry.remove(ext_to_remove)
         # Clean up session from database
         store.delete_session(session_id)
 
@@ -531,6 +616,33 @@ class WebSocketManager:
 
 
 manager = WebSocketManager()
+
+
+# ========== Active Page Registry ==========
+class ActivePageRegistry:
+    """Tracks active browser pages reported by extensions."""
+
+    def __init__(self):
+        self._pages: Dict[str, list] = {}
+        self._last_updated: Dict[str, int] = {}
+
+    def update(self, extension_id: str, pages: list):
+        self._pages[extension_id] = pages
+        self._last_updated[extension_id] = int(time.time() * 1000)
+
+    def remove(self, extension_id: str):
+        self._pages.pop(extension_id, None)
+        self._last_updated.pop(extension_id, None)
+
+    def get_all(self) -> list:
+        result = []
+        for ext_id, pages in self._pages.items():
+            for page in pages:
+                result.append({**page, "extension_id": ext_id})
+        return result
+
+
+page_registry = ActivePageRegistry()
 
 
 # ========== WebSocket Endpoint ==========
@@ -680,6 +792,20 @@ async def handle_websocket_message(websocket: WebSocket, session_id: str, msg: d
             "payload": {"message_id": new_msg.id, "status": "ok"}
         }))
 
+    elif msg_type == "pages_sync":
+        pages = payload.get("pages", [])
+        ext_id = None
+        for eid, sid in manager.extension_to_session.items():
+            if sid == session_id:
+                ext_id = eid
+                break
+        if ext_id:
+            page_registry.update(ext_id, pages)
+            await websocket.send_text(json.dumps({
+                "type": "pages_sync_ok",
+                "payload": {"count": len(pages)}
+            }))
+
     else:
         await websocket.send_text(json.dumps({
             "type": "error",
@@ -695,6 +821,7 @@ def health_check():
         "status": "ok",
         "service": "GAPI Server",
         "version": "2.0.0",
+        "connected_extensions": len(manager.active_connections),
         "timestamp": int(time.time() * 1000)
     }
 
@@ -785,6 +912,26 @@ def validate_api_key_endpoint(
     return {"valid": False}
 
 
+# ========== Active Pages Endpoint ==========
+@app.get("/v1/pages")
+async def list_active_pages(
+    site: Optional[str] = None,
+    auth=Depends(verify_auth)
+):
+    """List active browser pages with conversation state."""
+    pages = page_registry.get_all()
+    if site:
+        pages = [p for p in pages if p.get("site") == site]
+    return {
+        "pages": pages,
+        "meta": {
+            "total": len(pages),
+            "connected_extensions": len(manager.active_connections),
+            "timestamp": int(time.time() * 1000)
+        }
+    }
+
+
 # ========== Conversation Endpoints ==========
 @app.get("/v1/conversations")
 async def list_conversations_endpoint(
@@ -840,15 +987,30 @@ async def send_message_endpoint(data: MessageSend, auth=Depends(verify_auth)):
     now = int(time.time() * 1000)
     msg_id = f"msg_{now}_{secrets.token_hex(4)}"
 
+    msg_role = data.role if data.role in ("user", "model", "assistant") else "user"
+
     new_msg = Message(
         id=msg_id,
         conversation_id=data.conversation_id,
-        role="user",
+        role=msg_role,
         content=data.content,
         attachments=data.attachments,
         timestamp=now
     )
     store.add_message(new_msg)
+
+    # Broadcast to connected WebSocket clients so extensions can act on new messages
+    if msg_role == "user":
+        await manager.broadcast({
+            "type": "message_pending",
+            "payload": {
+                "message_id": msg_id,
+                "conversation_id": data.conversation_id,
+                "content": data.content,
+                "timestamp": now
+            }
+        })
+
     return {"message_id": msg_id, "status": "queued"}
 
 
@@ -959,6 +1121,37 @@ async def delete_image_endpoint(image_id: str, auth=Depends(verify_auth)):
     return {"status": "deleted", "image_id": image_id}
 
 
+# ========== Site Config Endpoints ==========
+@app.get("/v1/config/sites")
+async def list_site_configs_endpoint(auth=Depends(verify_auth)):
+    """List all site configurations."""
+    configs = store.list_site_configs()
+    return {"configs": configs}
+
+
+@app.post("/v1/config/sites")
+async def upsert_site_config_endpoint(data: SiteConfigCreate, auth=Depends(verify_auth)):
+    """Create or update a site configuration."""
+    config_id = data.id or f"site_{secrets.token_hex(8)}"
+    result = store.upsert_site_config(
+        config_id=config_id,
+        url_pattern=data.url_pattern,
+        name=data.name,
+        selectors=data.selectors,
+        enabled=data.enabled
+    )
+    return result
+
+
+@app.delete("/v1/config/sites/{config_id}")
+async def delete_site_config_endpoint(config_id: str, auth=Depends(verify_auth)):
+    """Delete a site configuration."""
+    success = store.delete_site_config(config_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Site config not found")
+    return {"status": "deleted", "config_id": config_id}
+
+
 # ========== Legacy CDP Bridge ==========
 @app.post("/v1/bridge")
 async def cdp_bridge(action: BrowserAction):
@@ -976,15 +1169,6 @@ async def cdp_bridge(action: BrowserAction):
         "physical_trace": result
     }
 
-
-# ========== Startup ==========
-@app.on_event("startup")
-async def startup_event():
-    logger.info("GAPI Server v2.0.0 starting")
-    logger.info("DEV_MODE=%s", DEV_MODE)
-    logger.info("CORS origins: %s", ALLOWED_ORIGINS)
-    logger.info("Image dir: %s", IMAGES_DIR)
-    logger.info("Database: %s", DB_PATH)
 
 
 if __name__ == "__main__":

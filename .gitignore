@@ -33,6 +33,9 @@ server/images/
 .DS_Store
 Thumbs.db
 
+# PID files
+*.pid
+
 # Logs
 *.log
 debug.log

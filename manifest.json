@@ -15,7 +15,8 @@
     "https://gemini.google.com/*",
     "https://claude.ai/*",
     "https://www.nebula.gg/*",
-    "http://127.0.0.1:18792/*"
+    "http://*/*",
+    "ws://*/*"
   ],
   "action": {
     "default_title": "開啟 Gemini 分類助手"
@@ -33,6 +34,9 @@
         "https://claude.ai/*"
       ],
       "js": [
+        "content-site-registry.js",
+        "content-site-gemini.js",
+        "content-site-claude.js",
         "content.js"
       ],
       "run_at": "document_idle"

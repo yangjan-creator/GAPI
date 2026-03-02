@@ -1726,6 +1726,28 @@
       </div>
     </div>
 
+    <!-- GAPI Server Config Section -->
+    <div class="operation-logs-section" id="gapiServerSection" style="background: #f0fdf4; border-color: #86efac;">
+      <div class="operation-logs-header" id="gapiServerHeader">
+        <span class="operation-logs-toggle" id="gapiServerToggle">▶</span>
+        <span class="operation-logs-title">Server 配置</span>
+        <span id="gapiServerStatus" style="width: 10px; height: 10px; border-radius: 50%; background: #94a3b8; display: inline-block; margin-left: auto;"></span>
+      </div>
+      <div class="operation-logs-content" id="gapiServerContent" style="display: none;">
+        <div class="operation-logs-stats" style="background: white; padding: 1rem; border-radius: 0.375rem; margin-bottom: 0.75rem;">
+          <div style="margin-bottom: 0.75rem;">
+            <label style="display: block; font-size: 0.75rem; font-weight: 600; color: #16a34a; margin-bottom: 0.25rem;">Server 地址 (host:port):</label>
+            <input type="text" id="gapiServerHostInput" class="search-input" placeholder="localhost:18799" style="font-size: 0.8125rem;">
+          </div>
+          <div style="display: flex; gap: 0.5rem;">
+            <button class="btn-primary" id="gapiServerSaveBtn" style="flex: 1; padding: 0.5rem; font-size: 0.8125rem;">儲存</button>
+            <button class="btn-secondary" id="gapiServerTestBtn" style="flex: 1; padding: 0.5rem; font-size: 0.8125rem;">測試連線</button>
+          </div>
+          <div id="gapiServerConfigStatus" style="margin-top: 0.5rem; font-size: 0.75rem; color: #64748b; min-height: 1.2rem;"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- R2 Storage Section - Cloudflare R2 儲存 -->
     <div class="operation-logs-section" id="r2StorageSection" style="background: #e0f2fe; border-color: #7dd3fc;">
       <div class="operation-logs-header" id="r2StorageHeader">

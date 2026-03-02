@@ -9,6 +9,10 @@ importScripts('db.js');
 // - 用於將對話紀錄上傳到 Cloudflare R2 並從 R2 查詢
 importScripts('r2.js');
 
+// 分頁路由模組
+// - 抽象化多站點分頁查詢，取代寫死的 URL
+importScripts('tab-router.js');
+
 // ========== Admin Web Realtime Push (externally_connectable) ==========
 // Keep service worker alive while admin page is open via Port.
 const adminPorts = new Set();
@@ -16,10 +20,45 @@ const adminPorts = new Set();
 // ========== GAPI Server WebSocket Connection (P0.2) ==========
 // WebSocket client for authenticated communication with GAPI Server
 
-const GAPI_WS_URL = 'ws://localhost:18799/ws';
-const GAPI_HTTP_URL = 'http://localhost:18799';
+const DEFAULT_GAPI_HOST = 'localhost:18799';
+let GAPI_WS_URL = `ws://${DEFAULT_GAPI_HOST}/ws`;
+let GAPI_HTTP_URL = `http://${DEFAULT_GAPI_HOST}`;
 const RECONNECT_INTERVAL = 5000; // 5 seconds
 const PING_INTERVAL = 30000; // 30 seconds
+
+// 從 storage 讀取 Server 配置，更新全域 URL
+async function loadServerConfig() {
+  try {
+    const result = await chrome.storage.local.get(['gapiServerHost']);
+    const host = result.gapiServerHost || DEFAULT_GAPI_HOST;
+    GAPI_WS_URL = `ws://${host}/ws`;
+    GAPI_HTTP_URL = `http://${host}`;
+    console.log(`[GAPI] Server config loaded: ${host}`);
+  } catch (e) {
+    console.warn('[GAPI] Failed to load server config, using default:', e);
+  }
+}
+
+// 監聽 storage 變更，URL 改變時自動重連
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.gapiServerHost) {
+    const newHost = changes.gapiServerHost.newValue || DEFAULT_GAPI_HOST;
+    console.log(`[GAPI] Server host changed to: ${newHost}`);
+    GAPI_WS_URL = `ws://${newHost}/ws`;
+    GAPI_HTTP_URL = `http://${newHost}`;
+    // 更新 TokenManager 的 server URL
+    tokenManager.serverUrl = GAPI_HTTP_URL;
+    tokenManager.invalidate();
+    // 更新 HTTP client 的 base URL
+    gapiHttpClient.baseUrl = GAPI_HTTP_URL;
+    // 重連 WebSocket
+    if (gapiClient.ws) {
+      gapiClient.disconnect();
+    }
+    initGAPIConnection();
+    initGAPIHttpConnection();
+  }
+});
 
 // ========== Token Manager ==========
 // Manages authentication tokens obtained from the GAPI server.
@@ -197,6 +236,7 @@ class GAPIWebSocketClient {
         
         this.startHeartbeat();
         this.notifyAdmin({ type: 'gapi_connected', sessionId: this.sessionId });
+        this.syncPages();
         return;
       }
 
@@ -241,6 +281,11 @@ class GAPIWebSocketClient {
         if (handler) handler(msg.payload);
         // 廣播給 Admin Web
         broadcastAdminEvent('gapi_event', msg.payload);
+        return;
+      }
+
+      if (msg.type === 'pages_sync_ok') {
+        console.log('[GAPI-WS] Pages synced:', msg.payload.count);
         return;
       }
 
@@ -362,6 +407,20 @@ class GAPIWebSocketClient {
         });
       }
     }, RECONNECT_INTERVAL);
+  }
+
+  // 同步活躍頁面到 GAPI Server
+  async syncPages() {
+    if (!this.authenticated) return;
+    try {
+      const pages = await collectActivePages();
+      this.send({
+        type: 'pages_sync',
+        payload: { pages }
+      });
+    } catch (e) {
+      console.error('[GAPI-WS] Pages sync error:', e);
+    }
   }
 
   // 斷開連接
@@ -684,6 +743,8 @@ const gapiHttpClient = new GAPIHttpClient();
 
 // 初始化 GAPI HTTP 連接
 async function initGAPIHttpConnection() {
+  await loadServerConfig();
+  gapiHttpClient.baseUrl = GAPI_HTTP_URL;
   try {
     const result = await chrome.storage.local.get(['gapiExtensionId']);
     let extensionId = result.gapiExtensionId;
@@ -703,6 +764,7 @@ async function initGAPIHttpConnection() {
 
 // 初始化 GAPI 連接
 async function initGAPIConnection() {
+  await loadServerConfig();
   // 從 storage 取得 extension ID 或生成
   try {
     const result = await chrome.storage.local.get(['gapiExtensionId']);
@@ -721,8 +783,8 @@ async function initGAPIConnection() {
   }
 }
 
-// 調用 initGAPIConnection 進行連接 (可選：延遲啟動)
-// initGAPIConnection(); // 註釋掉，需要時再手動調用
+// 調用 initGAPIConnection 進行連接
+initGAPIConnection();
 
 // ========== Auto download toggle ==========
 // Default: disabled (per user request)
@@ -1119,12 +1181,29 @@ async function manageSidePanelForTab(tabId, tab) {
   }
 }
 
+// ========== Active Pages Sync (P4) ==========
+let _syncPagesTimer = null;
+function debouncedSyncPages() {
+  if (_syncPagesTimer) clearTimeout(_syncPagesTimer);
+  _syncPagesTimer = setTimeout(() => {
+    if (gapiClient && gapiClient.authenticated) {
+      gapiClient.syncPages();
+    }
+  }, 2000);
+}
+
 // 當標籤頁更新時，檢查是否為 Gemini 網頁
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   // 只有在 URL 改變時才檢查（避免過度觸發）
   if (info.url || info.status === 'complete') {
     await manageSidePanelForTab(tabId, tab);
+    debouncedSyncPages();
   }
+});
+
+// 當標籤頁關閉時，同步活躍頁面
+chrome.tabs.onRemoved.addListener(() => {
+  debouncedSyncPages();
 });
 
 // 當標籤頁切換時，檢查當前活動標籤頁是否為 Gemini 網頁
@@ -1158,8 +1237,8 @@ const downloadImageProcessingLocks = new Map(); // urlKey -> { timestamp, timeou
 // 監控 Background 的下載事件：捕捉下載的實體網址
 chrome.downloads.onCreated.addListener((downloadItem) => {
   // 將這個捕捉到的 URL 發回給 Content Script 或 Side Panel
-  // 嘗試發送給所有 Gemini 標籤頁
-  chrome.tabs.query({ url: 'https://gemini.google.com/*' }, (tabs) => {
+  // 嘗試發送給所有支援站點的標籤頁
+  findAllSupportedTabs().then(tabs => {
     tabs.forEach(tab => {
       chrome.tabs.sendMessage(tab.id, {
         action: 'CAPTURE_REAL_DOWNLOAD_URL',
@@ -1344,8 +1423,8 @@ chrome.action.onClicked.addListener(async (tab) => {
       // 如果不是 Gemini 網頁，嘗試打開或跳轉到 Gemini
       const geminiUrl = 'https://gemini.google.com/';
       
-      // 檢查是否已有 Gemini 標籤頁開啟
-      const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+      // 檢查是否已有支援站點的標籤頁開啟
+      const tabs = await findAllSupportedTabs();
       
       if (tabs.length > 0) {
         // 切換到現有的 Gemini 標籤頁並打開 Side Panel
@@ -2439,7 +2518,7 @@ chrome.webRequest.onCompleted.addListener(
 
     if (!isTargetUrl) return;
 
-    chrome.tabs.query({ url: '*://gemini.google.com/*' }, (tabs) => {
+    findAllSupportedTabs().then(tabs => {
       tabs.forEach(tab => {
         chrome.tabs.sendMessage(tab.id, {
           action: 'RECORD_RESPONSE_URL',
@@ -3375,6 +3454,10 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       // 關閉遠端會話
       handleRemoteCloseSession(message, sendResponse);
       return true;
+    } else if (message.action === 'listTabs') {
+      // 列出所有支援站點的分頁
+      handleRemoteListTabs(message, sendResponse);
+      return true;
     } else {
       sendResponse({ success: false, error: '未知的操作類型' });
       return false;
@@ -3432,47 +3515,35 @@ async function pingGeminiTab(tabId) {
   });
 }
 
-async function findGeminiTabForProfile(userProfile) {
-  const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
-  if (!tabs || tabs.length === 0) return null;
-  const wanted = userProfile || 'default';
-  for (const t of tabs) {
-    const p = parseUserProfileFromUrl(t.url || '') || 'default';
-    if (p === wanted) return t;
+async function collectActivePages() {
+  const tabs = await findAllSupportedTabs();
+  const pages = [];
+  for (const t of tabs || []) {
+    const url = t.url || '';
+    const site = t.site || getSiteFromUrl(url) || 'unknown';
+    let ping = null;
+    try {
+      ping = await pingGeminiTab(t.id);
+    } catch { /* tab not ready */ }
+    pages.push({
+      tab_id: t.id,
+      url,
+      site,
+      chat_id: ping?.chatId || parseChatIdFromUrl(url) || null,
+      title: ping?.title || t.title || null,
+      user_profile: ping?.userProfile || parseUserProfileFromUrl(url) || 'default',
+      monitoring: ping?.monitoring || false
+    });
   }
-  // fallback: any gemini tab
-  return tabs[0] || null;
+  return pages;
 }
 
-async function findGeminiTabForProfileAndChat(userProfile, chatId) {
-  const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
-  if (!tabs || tabs.length === 0) return null;
+async function findGeminiTabForProfile(userProfile, siteName) {
+  return findTabForSite(siteName || 'gemini', userProfile);
+}
 
-  const wantedProfile = userProfile || 'default';
-  const wantedChatId = String(chatId || '');
-
-  // 1) exact match: same profile + same chatId by URL
-  for (const t of tabs) {
-    const p = parseUserProfileFromUrl(t.url || '') || 'default';
-    const c = parseChatIdFromUrl(t.url || '');
-    if (p === wantedProfile && c === wantedChatId) return t;
-  }
-
-  // 2) exact match by ping (more reliable if URL changes)
-  for (const t of tabs) {
-    const p = parseUserProfileFromUrl(t.url || '') || 'default';
-    if (p !== wantedProfile) continue;
-    const resp = await pingGeminiTab(t.id);
-    if (resp && resp.status === 'ok' && String(resp.chatId || '') === wantedChatId) return t;
-  }
-
-  // 3) fallback: any same profile
-  for (const t of tabs) {
-    const p = parseUserProfileFromUrl(t.url || '') || 'default';
-    if (p === wantedProfile) return t;
-  }
-
-  return tabs[0] || null;
+async function findGeminiTabForProfileAndChat(userProfile, chatId, siteName) {
+  return findTabForSiteAndChat(siteName || 'gemini', userProfile, chatId);
 }
 
 async function waitForTabComplete(tabId, timeoutMs = 30000) {
@@ -3773,10 +3844,11 @@ async function handleAdminExternalMessage(message, sendResponse) {
     }
 
     if (action === 'ADMIN_LIST_OPEN_TABS') {
-      const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+      const tabs = await findAllSupportedTabs();
       const out = [];
       for (const t of tabs || []) {
         const url = t.url || '';
+        const site = t.site || getSiteFromUrl(url) || 'unknown';
         const derivedUserProfile = parseUserProfileFromUrl(url) || 'default';
         const derivedChatId = parseChatIdFromUrl(url);
         let ping = null;
@@ -3789,6 +3861,7 @@ async function handleAdminExternalMessage(message, sendResponse) {
           tabId: t.id,
           windowId: t.windowId,
           url,
+          site,
           derivedUserProfile,
           derivedChatId,
           ping: ping
@@ -3852,16 +3925,26 @@ async function handleRemoteSendMessage(message, sendResponse) {
     // 清空該會話的圖片（準備接收新的圖片）
     session.images = [];
 
-    // 找到 Gemini 標籤頁並發送消息
-    const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
-    
-    if (tabs.length === 0) {
-      sendResponse({ success: false, error: '找不到 Gemini 標籤頁，請先打開 Gemini 頁面' });
-      return;
+    // 從 session 取得站點和分頁
+    const siteName = session.site || 'gemini';
+    let geminiTab = null;
+
+    // 優先使用 session 綁定的 tabId
+    if (session.tabId) {
+      geminiTab = await findTabById(session.tabId);
+      if (!geminiTab) {
+        console.warn('[Background] [遠端API] 綁定的 tabId', session.tabId, '已失效，改用自動查找');
+      }
     }
 
-    // 使用第一個 Gemini 標籤頁
-    const geminiTab = tabs[0];
+    if (!geminiTab) {
+      const tabs = await findAllTabsForSite(siteName);
+      if (tabs.length === 0) {
+        sendResponse({ success: false, error: `找不到 ${siteName} 標籤頁，請先打開對應頁面` });
+        return;
+      }
+      geminiTab = tabs[0];
+    }
     
     // 記錄發送時間，用於後續監聽回復
     const sendTimestamp = Date.now();
@@ -3945,12 +4028,18 @@ async function handleRemoteGetResult(message, sendResponse) {
 function handleRemoteCreateSession(message, sendResponse) {
   try {
     const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
+    const site = message.site || 'gemini';
+    const tabId = message.tabId || null;
+
     remoteSessions.set(sessionId, {
       messages: [],
       images: [],
+      site: site,
+      tabId: tabId,
       createdAt: Date.now()
     });
+
+    console.log('[Background] [遠端API] 建立會話:', sessionId, '站點:', site, 'tabId:', tabId);
 
     // 定期清理過期會話（24小時）
     setTimeout(() => {
@@ -3967,7 +4056,9 @@ function handleRemoteCreateSession(message, sendResponse) {
 
     sendResponse({
       success: true,
-      sessionId: sessionId
+      sessionId: sessionId,
+      site: site,
+      tabId: tabId
     });
   } catch (error) {
     console.error('[Background] [遠端API] 處理創建會話時發生錯誤:', error);
@@ -3993,6 +4084,26 @@ function handleRemoteCloseSession(message, sendResponse) {
     }
   } catch (error) {
     console.error('[Background] [遠端API] 處理關閉會話時發生錯誤:', error);
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+// 處理遠端列出分頁
+async function handleRemoteListTabs(message, sendResponse) {
+  try {
+    const tabs = await findAllSupportedTabs();
+    const out = [];
+    for (const t of tabs) {
+      out.push({
+        tabId: t.id,
+        url: t.url || '',
+        title: t.title || '',
+        site: t.site || getSiteFromUrl(t.url) || 'unknown'
+      });
+    }
+    sendResponse({ success: true, tabs: out });
+  } catch (error) {
+    console.error('[Background] [遠端API] 處理列出分頁時發生錯誤:', error);
     sendResponse({ success: false, error: error.message });
   }
 }
@@ -4060,23 +4171,43 @@ function startMonitoringResponse(sessionId, tabId, sendTimestamp) {
         }
         
         if (response && response.success && response.messages) {
-          // 只獲取發送時間之後的新消息（助手回復）
-          const newMessages = response.messages.filter(msg => 
-            (msg.role === 'model' || msg.role === 'assistant') &&
-            msg.timestamp > sendTimestamp
-          );
-          
+          // UI 噪音黑名單 — exact match + prefix match 過濾頁面 UI 元素
+          const UI_NOISE_EXACT = new Set([
+            'fast', 'quality', 'balanced',
+            'write', 'plan', 'research', 'learn',
+            'send message', 'upload', 'microphone',
+            'new chat', 'gemini'
+          ]);
+          const UI_NOISE_PREFIX = [
+            'meet gemini',
+            'welcome to gemini',
+            'i can help you with',
+          ];
+
+          // 只獲取發送時間之後的新消息（助手回復），並過濾噪音
+          const newMessages = response.messages.filter(msg => {
+            if (msg.role !== 'model' && msg.role !== 'assistant') return false;
+            if (msg.timestamp <= sendTimestamp) return false;
+            const text = (msg.text || '').trim();
+            if (text.length < 2) return false;
+            const lower = text.toLowerCase();
+            if (UI_NOISE_EXACT.has(lower)) return false;
+            if (UI_NOISE_PREFIX.some(p => lower.startsWith(p))) return false;
+            return true;
+          });
+
           if (newMessages.length > 0) {
             // 記錄新消息到會話
             newMessages.forEach(msg => {
-              const exists = session.messages.some(m => 
-                m.role === 'assistant' && m.text === msg.text
+              const text = (msg.text || '').trim();
+              const exists = session.messages.some(m =>
+                m.role === 'assistant' && m.text === text
               );
-              
+
               if (!exists) {
                 session.messages.push({
                   role: 'assistant',
-                  text: msg.text || '',
+                  text: text,
                   timestamp: msg.timestamp || Date.now()
                 });
                 console.log('[Background] [遠端API] ✅ 檢測到新回復，已記錄到會話:', sessionId);

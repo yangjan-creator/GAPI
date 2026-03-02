@@ -98,6 +98,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const r2SyncBtn = document.getElementById('r2SyncBtn');
   const r2ResultsList = document.getElementById('r2ResultsList');
 
+  // GAPI Server 配置相關元素
+  const gapiServerSection = document.getElementById('gapiServerSection');
+  const gapiServerHeader = document.getElementById('gapiServerHeader');
+  const gapiServerToggle = document.getElementById('gapiServerToggle');
+  const gapiServerContent = document.getElementById('gapiServerContent');
+  const gapiServerHostInput = document.getElementById('gapiServerHostInput');
+  const gapiServerSaveBtn = document.getElementById('gapiServerSaveBtn');
+  const gapiServerTestBtn = document.getElementById('gapiServerTestBtn');
+  const gapiServerConfigStatus = document.getElementById('gapiServerConfigStatus');
+  const gapiServerStatus = document.getElementById('gapiServerStatus');
+
   // 狀態
   let currentChatId = null;
   let currentTitle = null;
@@ -116,6 +127,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let operationLogsExpanded = false; // 操作日誌監控區域是否展開
   let clickMonitorExpanded = false; // 點擊監聽記錄區域是否展開
   let r2StorageExpanded = false; // R2 儲存區域是否展開
+  let gapiServerExpanded = false; // GAPI Server 配置區域是否展開
   let currentConversationMessages = []; // 當前對話的消息列表
   let pendingAttachmentFile = null; // File
   let operationLogsRefreshInterval = null; // 操作日誌自動刷新定時器
@@ -211,10 +223,14 @@ document.addEventListener('DOMContentLoaded', () => {
     await loadDownloadButtonsTestExpandedState();
     await loadClickMonitorExpandedState();
     await loadR2StorageExpandedState();
-    
+    await loadGapiServerExpandedState();
+
+    // 載入 GAPI Server 配置
+    await loadGapiServerConfig();
+
     // 載入所有圖片記錄
     await loadAllImagesRecord();
-    
+
     // 載入 R2 配置
     await loadR2Config();
     
@@ -747,6 +763,29 @@ document.addEventListener('DOMContentLoaded', () => {
             });
           });
         }
+      });
+    }
+
+    // GAPI Server 配置區域展開/收起
+    if (gapiServerHeader) {
+      gapiServerHeader.addEventListener('click', () => {
+        toggleGapiServerSection();
+      });
+    }
+
+    // GAPI Server 儲存按鈕
+    if (gapiServerSaveBtn) {
+      gapiServerSaveBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await saveGapiServerConfig();
+      });
+    }
+
+    // GAPI Server 測試連線按鈕
+    if (gapiServerTestBtn) {
+      gapiServerTestBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await testGapiServerConnection();
       });
     }
 
@@ -4683,6 +4722,100 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (error) {
       console.error('[Side Panel] 載入點擊監聽記錄展開狀態時發生錯誤:', error);
     }
+  }
+
+  // ========== GAPI Server 配置功能 ==========
+
+  // 切換 GAPI Server 配置區域展開/收起
+  function toggleGapiServerSection() {
+    gapiServerExpanded = !gapiServerExpanded;
+    if (gapiServerContent) gapiServerContent.style.display = gapiServerExpanded ? 'block' : 'none';
+    if (gapiServerToggle) gapiServerToggle.textContent = gapiServerExpanded ? '▼' : '▶';
+    saveGapiServerExpandedState();
+  }
+
+  // 載入 GAPI Server 區域展開狀態
+  async function loadGapiServerExpandedState() {
+    try {
+      const result = await chrome.storage.local.get(['gapiServerExpanded']);
+      if (result.gapiServerExpanded === true) {
+        gapiServerExpanded = true;
+        if (gapiServerToggle) gapiServerToggle.textContent = '▼';
+        if (gapiServerContent) gapiServerContent.style.display = 'block';
+      }
+    } catch (e) {
+      console.error('[Side Panel] 載入 GAPI Server 展開狀態失敗:', e);
+    }
+  }
+
+  // 保存 GAPI Server 區域展開狀態
+  async function saveGapiServerExpandedState() {
+    try {
+      await chrome.storage.local.set({ gapiServerExpanded });
+    } catch (e) {
+      console.error('[Side Panel] 保存 GAPI Server 展開狀態失敗:', e);
+    }
+  }
+
+  // 載入 GAPI Server 配置
+  async function loadGapiServerConfig() {
+    try {
+      const result = await chrome.storage.local.get(['gapiServerHost']);
+      const host = result.gapiServerHost || '';
+      if (gapiServerHostInput) gapiServerHostInput.value = host;
+      updateGapiServerConfigStatus(host ? `目前: ${host}` : '使用預設值 localhost:18799', 'info');
+    } catch (e) {
+      console.error('[Side Panel] 載入 GAPI Server 配置失敗:', e);
+      updateGapiServerConfigStatus('載入失敗: ' + e.message, 'error');
+    }
+  }
+
+  // 儲存 GAPI Server 配置
+  async function saveGapiServerConfig() {
+    const host = (gapiServerHostInput?.value || '').trim();
+    if (!host) {
+      // 清除自訂值，回到預設
+      await chrome.storage.local.remove(['gapiServerHost']);
+      updateGapiServerConfigStatus('已清除，使用預設值 localhost:18799', 'success');
+      return;
+    }
+    try {
+      await chrome.storage.local.set({ gapiServerHost: host });
+      updateGapiServerConfigStatus(`已儲存: ${host}`, 'success');
+    } catch (e) {
+      updateGapiServerConfigStatus('儲存失敗: ' + e.message, 'error');
+    }
+  }
+
+  // 測試 GAPI Server 連線
+  async function testGapiServerConnection() {
+    const host = (gapiServerHostInput?.value || '').trim() || 'localhost:18799';
+    updateGapiServerConfigStatus('測試連線中...', 'info');
+    if (gapiServerStatus) gapiServerStatus.style.background = '#94a3b8'; // grey
+    try {
+      const resp = await fetch(`http://${host}/status`, { signal: AbortSignal.timeout(5000) });
+      if (resp.ok) {
+        const data = await resp.json();
+        updateGapiServerConfigStatus(`連線成功 - ${data.connected_extensions ?? 0} 個連線`, 'success');
+        if (gapiServerStatus) gapiServerStatus.style.background = '#22c55e'; // green
+      } else {
+        updateGapiServerConfigStatus(`連線失敗: HTTP ${resp.status}`, 'error');
+        if (gapiServerStatus) gapiServerStatus.style.background = '#ef4444'; // red
+      }
+    } catch (e) {
+      updateGapiServerConfigStatus('連線失敗: ' + e.message, 'error');
+      if (gapiServerStatus) gapiServerStatus.style.background = '#ef4444'; // red
+    }
+  }
+
+  // 更新 GAPI Server 配置狀態訊息
+  function updateGapiServerConfigStatus(message, type = 'info') {
+    if (!gapiServerConfigStatus) return;
+    gapiServerConfigStatus.textContent = message;
+    gapiServerConfigStatus.style.color =
+      type === 'success' ? '#16a34a' :
+      type === 'error' ? '#dc2626' :
+      '#64748b';
   }
 
   // ========== R2 儲存功能 ==========
