@@ -1,9 +1,12 @@
 // Nebula Site Adapter
 // Selectors for nebula.gg AI agent chat platform.
-// Nebula uses React with Tailwind CSS. Key patterns:
-//   - Messages: .user-message-block / .nebula-message-block
-//   - Input: contenteditable div with role="textbox" and data-placeholder
+// Nebula uses Next.js (Turbopack) + React + Tailwind CSS + shadcn/ui.
+// Key patterns:
+//   - Messages: .message-appear, .highlight-message, .streaming-cursor
+//   - Input: <textarea> or <input type="text"> (plain text, Zustand messageDraft)
+//   - Send: <button type="submit"> with ArrowRight SVG inside <form>
 //   - Sidebar: channel list with /chat/channel/ links
+//   - NO ProseMirror/Tiptap — plain text input only
 
 (function() {
   'use strict';
@@ -70,19 +73,35 @@
       '[data-role="assistant"]'
     ],
 
-    // Input selectors
+    // Input selectors (plain text input — no contenteditable)
     inputSelectors: [
-      'div[contenteditable="true"][role="textbox"]',
-      'div[contenteditable="true"][data-placeholder]',
+      // Primary: textarea (most likely for plain text messageDraft)
+      'textarea',
+      // Input type text with Nebula-style placeholder
+      'input[type="text"][placeholder]',
+      // shadcn/ui Input pattern
+      '[data-slot="input"]',
+      // Form input fallback
+      'form input[type="text"]',
+      // Broadest fallback: any contenteditable (in case they change later)
       'div[contenteditable="true"]'
     ],
 
-    // Send button selectors
+    // Send button selectors (submit button with ArrowRight SVG in form)
     sendButtonSelectors: [
+      // Primary: submit button in form (most reliable for Nebula)
+      'form button[type="submit"]',
+      // Submit button anywhere
+      'button[type="submit"]',
+      // aria-label variations
       'button[aria-label*="Send"]',
       'button[aria-label*="send"]',
-      'button[type="submit"]',
-      'button[class*="send"]'
+      // Button with arrow icon (Nebula uses ArrowRight SVG)
+      'button:has(svg)',
+      // Class-based
+      'button[class*="send"]',
+      // Role-based fallback
+      '[role="button"][aria-label*="Send"]'
     ],
 
     // Scraper selector for GET_LAST_RESPONSE

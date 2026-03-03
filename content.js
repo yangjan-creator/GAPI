@@ -7031,8 +7031,14 @@
       // 步驟 3: 清空現有內容（如果有）
       _log.debug('[Gemini 分類助手] [發送消息] 清空現有內容...');
       try {
-        if (inputElement.tagName === 'TEXTAREA') {
-          inputElement.value = '';
+        if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT') {
+          // Use native setter to bypass React controlled component protection
+          const nativeSetter = Object.getOwnPropertyDescriptor(
+            inputElement.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype,
+            'value'
+          ).set;
+          nativeSetter.call(inputElement, '');
+          inputElement.dispatchEvent(new Event('input', { bubbles: true }));
         } else if (inputElement.isContentEditable) {
           inputElement.textContent = '';
           inputElement.innerText = '';
@@ -7043,6 +7049,68 @@
 
       // 步驟 4: 逐字輸入文字（模擬真人打字）
       _log.debug('[Gemini 分類助手] [發送消息] 開始模擬人類打字...');
+
+      // Determine if input is a native form element (textarea/input) vs contenteditable
+      const isNativeInput = inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT';
+
+      // Helper: insert a single character into the input element.
+      // For contenteditable elements, uses document.execCommand.
+      // For native textarea/input elements, sets .value and dispatches input event
+      // to trigger React/Zustand state updates.
+      function insertChar(el, char) {
+        if (isNativeInput) {
+          // For textarea/input: insert at cursor position via .value manipulation
+          const start = el.selectionStart || el.value.length;
+          const end = el.selectionEnd || el.value.length;
+          el.value = el.value.substring(0, start) + char + el.value.substring(end);
+          el.selectionStart = el.selectionEnd = start + char.length;
+          // Dispatch input event to notify React/Zustand of the change
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        } else {
+          document.execCommand('insertText', false, char);
+        }
+      }
+
+      // Helper: delete last character from the input element.
+      function deleteChar(el) {
+        if (isNativeInput) {
+          const pos = el.selectionStart || el.value.length;
+          if (pos > 0) {
+            el.value = el.value.substring(0, pos - 1) + el.value.substring(pos);
+            el.selectionStart = el.selectionEnd = pos - 1;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        } else {
+          el.dispatchEvent(new KeyboardEvent('keydown', {key:'Backspace',code:'Backspace',keyCode:8,bubbles:true}));
+          document.execCommand('delete', false);
+        }
+      }
+
+      // Helper: set full text on the input element (for fallback/correction).
+      function setFullText(el, text) {
+        if (isNativeInput) {
+          // Use native value setter to bypass React's synthetic event system
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+            el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype,
+            'value'
+          ).set;
+          nativeInputValueSetter.call(el, text);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        } else {
+          el.textContent = '';
+          document.execCommand('insertText', false, text);
+        }
+      }
+
+      // Helper: get current text from the input element.
+      function getCurrentText(el) {
+        if (isNativeInput) {
+          return el.value || '';
+        }
+        return el.textContent || el.innerText || '';
+      }
+
       try {
         inputElement.focus();
 
@@ -7077,17 +7145,16 @@
             const neighbors = NEARBY_KEYS[lower];
             if (neighbors) {
               const wrong = neighbors[Math.floor(Math.random() * neighbors.length)];
-              document.execCommand('insertText', false, wrong);
+              insertChar(inputElement, wrong);
               await sleep(rand(180, 400));   // 注意到打錯
               // 刪除
-              inputElement.dispatchEvent(new KeyboardEvent('keydown', {key:'Backspace',code:'Backspace',keyCode:8,bubbles:true}));
-              document.execCommand('delete', false);
+              deleteChar(inputElement);
               await sleep(rand(80, 200));    // 修正
             }
           }
 
           // --- 打正確的字 ---
-          document.execCommand('insertText', false, ch);
+          insertChar(inputElement, ch);
 
           // --- 決定延遲 ---
           if ('。！？.!?\n'.includes(ch)) {
@@ -7117,21 +7184,15 @@
         _log.debug('[Gemini 分類助手] [發送消息] ✓ 模擬打字完成，共', messageText.length, '字符');
 
         // 驗證
-        const currentText = inputElement.tagName === 'TEXTAREA'
-          ? inputElement.value
-          : (inputElement.textContent || inputElement.innerText || '');
+        const currentText = getCurrentText(inputElement);
         if (currentText.trim() !== messageText.trim()) {
-          _log.warn('[Gemini 分類助手] [發送消息] ⚠️ 打字驗證失敗，使用 execCommand 補正');
-          // 清空再一次填入
-          if (inputElement.isContentEditable) {
-            inputElement.textContent = '';
-          }
-          document.execCommand('insertText', false, messageText);
+          _log.warn('[Gemini 分類助手] [發送消息] ⚠️ 打字驗證失敗，使用直接填入補正');
+          setFullText(inputElement, messageText);
         }
       } catch (e) {
         _log.error('[Gemini 分類助手] [發送消息] ❌ 打字時發生錯誤，回退為瞬間填入:', e);
         inputElement.focus();
-        document.execCommand('insertText', false, messageText);
+        setFullText(inputElement, messageText);
       }
 
       // 打完後短暫停頓再按發送（模擬檢查內容）
@@ -7204,6 +7265,53 @@
       inputElement.dispatchEvent(enterKeyUp);
       
       _log.debug('[Gemini 分類助手] [發送消息] ✓ 已發送 Enter 鍵事件');
+
+      // 步驟 7: 驗證 Enter 是否真正提交了消息
+      // Wait briefly for the UI to process the submit
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Check if the input was cleared (indicates successful submission)
+      let postSendText = '';
+      if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT') {
+        postSendText = inputElement.value || '';
+      } else {
+        postSendText = inputElement.textContent || inputElement.innerText || '';
+      }
+
+      if (postSendText.trim() === messageText.trim()) {
+        // Input still contains the original text — Enter did not submit
+        _log.warn('[Gemini 分類助手] [發送消息] ⚠️ Enter 鍵未成功提交消息（輸入框仍有原文）');
+
+        // Last resort: try to find and submit the parent form directly
+        const parentForm = inputElement.closest('form');
+        if (parentForm) {
+          _log.debug('[Gemini 分類助手] [發送消息] 嘗試直接提交父 form 元素...');
+          try {
+            parentForm.requestSubmit();
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            // Check again
+            let afterFormSubmit = '';
+            if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT') {
+              afterFormSubmit = inputElement.value || '';
+            } else {
+              afterFormSubmit = inputElement.textContent || inputElement.innerText || '';
+            }
+
+            if (afterFormSubmit.trim() === '' || afterFormSubmit.trim() !== messageText.trim()) {
+              _log.debug('[Gemini 分類助手] [發送消息] ✓ form.requestSubmit() 成功');
+              _log.debug('[Gemini 分類助手] [發送消息] ========== 消息發送完成（方法：form提交） ==========');
+              return { success: true, method: 'form_submit' };
+            }
+          } catch (formErr) {
+            _log.warn('[Gemini 分類助手] [發送消息] form.requestSubmit() 失敗:', formErr.message);
+          }
+        }
+
+        _log.error('[Gemini 分類助手] [發送消息] ❌ 消息可能未成功發送 — 輸入框未被清空');
+        return { success: false, reason: 'Message may not have been sent - input not cleared after submit' };
+      }
+
       _log.debug('[Gemini 分類助手] [發送消息] ========== 消息發送完成（方法：鍵盤） ==========');
       return { success: true, method: 'keyboard' };
 
