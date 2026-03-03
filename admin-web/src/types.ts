@@ -106,3 +106,22 @@ export interface ReloadResponse {
   mode: string;
   note?: string;
 }
+
+export interface TabCreateRequest {
+  url: string;
+  active?: boolean;
+}
+
+export interface TabInfo {
+  tab_id: number;
+  url: string;
+  title: string;
+  chat_id: string | null;
+  site_type: string;
+}
+
+export interface BridgeRequest {
+  tab_id: number;
+  method: string;
+  params?: Record<string, unknown>;
+}

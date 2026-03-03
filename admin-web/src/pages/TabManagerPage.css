@@ -603,6 +603,58 @@
   gap: 8px;
 }
 
+/* ========== New Tab Form ========== */
+.tm-new-tab-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  flex-shrink: 0;
+}
+
+/* ========== Tab Info Bar ========== */
+.tm-tab-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  background: rgba(2, 6, 23, 0.35);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  min-height: 36px;
+}
+
+.tm-tab-info__loading {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tm-tab-info__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.tm-tab-info__label {
+  color: var(--muted2);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+
+.tm-tab-info__value {
+  color: var(--text);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ========== Loading Indicator ========== */
 .tm-loading {
   padding: 16px;

@@ -8,6 +8,7 @@ import type {
   SiteConfig,
   PagesResponse,
   TabInspectResult,
+  TabInfo,
   NebulaFile,
   ReloadResponse,
 } from './types';
@@ -231,6 +232,45 @@ export class GapiClient {
     return this.request(`/v1/tabs/${encodeURIComponent(tabId)}/navigate`, {
       method: 'POST',
       body: JSON.stringify({ url }),
+    });
+  }
+
+  // ========== Tab Creation & Info ==========
+
+  async createTab(url: string, active?: boolean): Promise<{ status: string; tab_id?: number }> {
+    return this.request('/v1/tabs/create', {
+      method: 'POST',
+      body: JSON.stringify({ url, active }),
+    });
+  }
+
+  async getTabInfo(tabId: number): Promise<TabInfo> {
+    return this.request(`/v1/tabs/${encodeURIComponent(tabId)}/info`);
+  }
+
+  // ========== CDP Bridge ==========
+
+  async bridge(tabId: number, method: string, params?: Record<string, unknown>): Promise<unknown> {
+    return this.request('/v1/bridge', {
+      method: 'POST',
+      body: JSON.stringify({ tab_id: tabId, method, params }),
+    });
+  }
+
+  // ========== Image Upload (Base64) ==========
+
+  async uploadImageBase64(
+    data: string,
+    filename?: string,
+    conversationId?: string,
+  ): Promise<ImageInfo> {
+    return this.request('/v1/images/upload', {
+      method: 'POST',
+      body: JSON.stringify({
+        data,
+        filename: filename || null,
+        conversation_id: conversationId || null,
+      }),
     });
   }
 

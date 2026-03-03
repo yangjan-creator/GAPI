@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ActivePage, NebulaFile, TabInspectResult } from '../types';
+import type { ActivePage, NebulaFile, TabInfo, TabInspectResult } from '../types';
 import type { GapiClient } from '../client';
+import { useWebSocket } from '../hooks/useWebSocket';
 import './TabManagerPage.css';
 
 const PAGES_POLL_INTERVAL = 10_000;
@@ -122,6 +123,15 @@ export function TabManagerPage({ client }: TabManagerPageProps) {
   const [reloading, setReloading] = useState(false);
   const [reloadMenuOpen, setReloadMenuOpen] = useState(false);
 
+  // New Tab form state
+  const [newTabFormOpen, setNewTabFormOpen] = useState(false);
+  const [newTabUrl, setNewTabUrl] = useState('');
+  const [creatingTab, setCreatingTab] = useState(false);
+
+  // Tab Info state
+  const [tabInfo, setTabInfo] = useState<TabInfo | null>(null);
+  const [loadingTabInfo, setLoadingTabInfo] = useState(false);
+
   const reloadMenuRef = useRef<HTMLDivElement>(null);
 
   const selectedPage = useMemo(
@@ -197,11 +207,49 @@ export function TabManagerPage({ client }: TabManagerPageProps) {
     return () => document.removeEventListener('mousedown', handler);
   }, [reloadMenuOpen]);
 
+  // Fetch tab info when a tab is selected
+  useEffect(() => {
+    if (selectedTabId === null) {
+      setTabInfo(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchInfo = async () => {
+      setLoadingTabInfo(true);
+      try {
+        const info = await client.getTabInfo(selectedTabId);
+        if (!cancelled) setTabInfo(info);
+      } catch {
+        if (!cancelled) setTabInfo(null);
+      } finally {
+        if (!cancelled) setLoadingTabInfo(false);
+      }
+    };
+    fetchInfo();
+    return () => { cancelled = true; };
+  }, [selectedTabId, client]);
+
   // ---- Handlers ----
 
   const handleRefresh = () => {
     setLoadingPages(true);
     loadPages();
+  };
+
+  const handleCreateTab = async () => {
+    if (!newTabUrl.trim()) return;
+    setCreatingTab(true);
+    try {
+      await client.createTab(newTabUrl.trim());
+      setNewTabUrl('');
+      setNewTabFormOpen(false);
+      // Refresh pages list to show the new tab
+      loadPages();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCreatingTab(false);
+    }
   };
 
   const handleSelectTab = (tabId: number) => {
@@ -212,6 +260,7 @@ export function TabManagerPage({ client }: TabManagerPageProps) {
     setNebulaFiles([]);
     setSelectedFile(null);
     setFileContent(null);
+    setTabInfo(null);
     setActiveDetailTab('inspect');
   };
 
@@ -596,6 +645,14 @@ export function TabManagerPage({ client }: TabManagerPageProps) {
           >
             {loadingPages ? 'Refreshing...' : 'Refresh'}
           </button>
+          <button
+            className="btn"
+            onClick={() => setNewTabFormOpen(!newTabFormOpen)}
+            aria-expanded={newTabFormOpen}
+            aria-label="Open new tab form"
+          >
+            New Tab
+          </button>
           <span className="tm-connection-status" role="status" aria-live="polite">
             <span
               className={`tm-status-dot${connectedExtensions > 0 ? ' tm-status-dot--connected' : ''}`}
@@ -636,6 +693,48 @@ export function TabManagerPage({ client }: TabManagerPageProps) {
           </div>
         </div>
       </div>
+
+      {/* New Tab Form */}
+      {newTabFormOpen && (
+        <div className="tm-new-tab-form">
+          <label htmlFor="tm-new-tab-url" className="tm-form-label">Open URL in new browser tab</label>
+          <div className="tm-nav-row">
+            <input
+              id="tm-new-tab-url"
+              className="input"
+              type="url"
+              placeholder="https://gemini.google.com/app"
+              value={newTabUrl}
+              onChange={(e) => setNewTabUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (!creatingTab && newTabUrl.trim()) handleCreateTab();
+                }
+                if (e.key === 'Escape') {
+                  setNewTabFormOpen(false);
+                }
+              }}
+              disabled={creatingTab}
+              autoFocus
+            />
+            <button
+              className="btn-primary"
+              onClick={handleCreateTab}
+              disabled={creatingTab || !newTabUrl.trim()}
+            >
+              {creatingTab ? 'Opening...' : 'Open'}
+            </button>
+            <button
+              className="btn"
+              onClick={() => setNewTabFormOpen(false)}
+              aria-label="Cancel new tab"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Layout */}
       <div className="tm-layout">
@@ -705,6 +804,32 @@ export function TabManagerPage({ client }: TabManagerPageProps) {
                   )}
                 </div>
               </div>
+              {/* Tab Info Bar */}
+              {loadingTabInfo && (
+                <div className="tm-tab-info" role="status" aria-live="polite">
+                  <span className="tm-tab-info__loading">Loading tab info...</span>
+                </div>
+              )}
+              {!loadingTabInfo && tabInfo && (
+                <div className="tm-tab-info" aria-label="Tab conversation info">
+                  {tabInfo.chat_id && (
+                    <div className="tm-tab-info__item">
+                      <span className="tm-tab-info__label">Chat ID</span>
+                      <span className="tm-tab-info__value mono">{tabInfo.chat_id}</span>
+                    </div>
+                  )}
+                  <div className="tm-tab-info__item">
+                    <span className="tm-tab-info__label">Title</span>
+                    <span className="tm-tab-info__value">{tabInfo.title || 'Untitled'}</span>
+                  </div>
+                  <div className="tm-tab-info__item">
+                    <span className="tm-tab-info__label">Site</span>
+                    <span className={`tm-badge ${SITE_TYPE_COLORS[tabInfo.site_type] || 'tm-badge--default'}`}>
+                      {tabInfo.site_type}
+                    </span>
+                  </div>
+                </div>
+              )}
               {renderDetailTabs()}
               <div className="tm-detail__body">
                 {activeDetailTab === 'inspect' && renderInspectPanel()}
