@@ -86,7 +86,7 @@ export function App() {
       case 'site-config':
         return client ? <SiteConfigPage client={client} /> : null;
       case 'tab-manager':
-        return client ? <TabManagerPage client={client} /> : null;
+        return client ? <TabManagerPage client={client} serverUrl={baseUrl} /> : null;
       case 'settings':
         return (
           <SettingsPage

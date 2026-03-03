@@ -40,6 +40,7 @@ const SITE_TYPE_COLORS: Record<string, string> = {
 
 interface TabManagerPageProps {
   client: GapiClient;
+  serverUrl: string;
 }
 
 function formatBytes(bytes: number): string {
@@ -80,12 +81,24 @@ function formatRelativeTime(isoString: string): string {
   }
 }
 
-export function TabManagerPage({ client }: TabManagerPageProps) {
+export function TabManagerPage({ client, serverUrl }: TabManagerPageProps) {
   // Pages list state
   const [pages, setPages] = useState<ActivePage[]>([]);
   const [connectedExtensions, setConnectedExtensions] = useState(0);
   const [loadingPages, setLoadingPages] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // WebSocket connection for real-time page updates
+  const { connected: wsConnected } = useWebSocket({
+    serverUrl,
+    onPagesUpdate: useCallback((updatedPages: ActivePage[], meta?: { total: number; connected_extensions: number }) => {
+      setPages(updatedPages);
+      if (meta) {
+        setConnectedExtensions(meta.connected_extensions);
+      }
+      setLoadingPages(false);
+    }, []),
+  });
 
   // Selection state
   const [selectedTabId, setSelectedTabId] = useState<number | null>(null);
@@ -160,13 +173,14 @@ export function TabManagerPage({ client }: TabManagerPageProps) {
     loadPages();
   }, [loadPages]);
 
-  // Poll pages list
+  // Poll pages list (only when WebSocket is disconnected)
   useEffect(() => {
+    if (wsConnected) return;
     const timer = window.setInterval(() => {
       if (!document.hidden) loadPages();
     }, PAGES_POLL_INTERVAL);
     return () => window.clearInterval(timer);
-  }, [loadPages]);
+  }, [loadPages, wsConnected]);
 
   // Clear selection when selected tab disappears
   useEffect(() => {
@@ -661,6 +675,13 @@ export function TabManagerPage({ client }: TabManagerPageProps) {
             {connectedExtensions > 0
               ? `${connectedExtensions} extension${connectedExtensions > 1 ? 's' : ''} connected`
               : 'No extensions connected'}
+          </span>
+          <span className="tm-ws-indicator" role="status" aria-live="polite">
+            <span
+              className={`tm-ws-dot${wsConnected ? ' tm-ws-dot--connected' : ''}`}
+              aria-hidden="true"
+            />
+            {wsConnected ? 'Real-time' : 'Polling'}
           </span>
         </div>
         <div className="tm-topbar__right" ref={reloadMenuRef} onKeyDown={handleReloadKeyDown}>
