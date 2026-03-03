@@ -735,9 +735,13 @@ class GAPIWebSocketClient {
     }
 
     if (action === 'EXTRACT_IMAGES') {
+      await chrome.storage.session.set({ _gapiArgs: { messageIndex: payload.message_index !== undefined ? payload.message_index : null } });
       const results = await chrome.scripting.executeScript({
         target: { tabId },
-        func: (messageIndex) => {
+        func: async () => {
+          const { _gapiArgs } = await chrome.storage.session.get('_gapiArgs');
+          const messageIndex = _gapiArgs?.messageIndex ?? null;
+          try {
           const host = location.hostname;
 
           // Image-hosting domains to match against
@@ -771,11 +775,11 @@ class GAPIWebSocketClient {
 
           // --- Gemini ---
           if (host.includes('gemini.google.com')) {
-            // Find model response containers
+            // Find model response containers (multiple fallback selectors for Gemini versions)
             const responseSelectors = [
               'message-content', '.message-content',
-              '[class*="model-response"]', '[data-role="model"]',
-              '[data-message-role="model"]'
+              '[class*="model-response"]', '[class*="assistant"]',
+              '[data-role="model"]', '[data-message-role="model"]'
             ];
             let responseBlocks = [];
             for (const sel of responseSelectors) {
@@ -874,9 +878,12 @@ class GAPIWebSocketClient {
             });
           });
           return { status: 'success', total_responses: responseBlocks.length, images: allImages };
-        },
-        args: [payload.message_index !== undefined ? payload.message_index : null]
+          } catch (err) {
+            return { status: 'failed', reason: 'Script error: ' + err.message };
+          }
+        }
       });
+      chrome.storage.session.remove('_gapiArgs');
       return results[0]?.result || { status: 'failed', reason: 'Script execution returned no result' };
     }
 
@@ -1105,9 +1112,12 @@ class GAPIWebSocketClient {
     // inspectToolCalls: deep inspect tool call summaries, file references, and collapsed sections
     if (action === 'inspectToolCalls') {
       const msgIdx = payload.message_index;
+      await chrome.storage.session.set({ _gapiArgs: { targetIndex: msgIdx !== undefined ? msgIdx : null } });
       const results = await chrome.scripting.executeScript({
         target: { tabId },
-        func: (targetIndex) => {
+        func: async () => {
+          const { _gapiArgs } = await chrome.storage.session.get('_gapiArgs');
+          const targetIndex = _gapiArgs?.targetIndex ?? null;
           const blocks = document.querySelectorAll('.user-message-block');
           if (blocks.length === 0) return { error: 'No message blocks found' };
 
@@ -1229,18 +1239,21 @@ class GAPIWebSocketClient {
           });
 
           return { total: blocks.length, url: location.href, blocks: results };
-        },
-        args: [msgIdx !== undefined ? msgIdx : null]
+        }
       });
+      chrome.storage.session.remove('_gapiArgs');
       return results[0]?.result || { status: 'failed', reason: 'No result' };
     }
 
     // expandToolCalls: click on collapsed tool call summaries to expand them, then read
     if (action === 'expandToolCalls') {
       const msgIdx = payload.message_index;
+      await chrome.storage.session.set({ _gapiArgs: { targetIndex: msgIdx !== undefined ? msgIdx : null } });
       const results = await chrome.scripting.executeScript({
         target: { tabId },
-        func: (targetIndex) => {
+        func: async () => {
+          const { _gapiArgs } = await chrome.storage.session.get('_gapiArgs');
+          const targetIndex = _gapiArgs?.targetIndex ?? null;
           return new Promise((resolve) => {
             const blocks = document.querySelectorAll('.user-message-block');
             if (blocks.length === 0) { resolve({ error: 'No message blocks found' }); return; }
@@ -1360,9 +1373,9 @@ class GAPIWebSocketClient {
               });
             }, 2000); // 2s wait for expansion animation
           });
-        },
-        args: [msgIdx !== undefined ? msgIdx : null]
+        }
       });
+      chrome.storage.session.remove('_gapiArgs');
       return results[0]?.result || { status: 'failed', reason: 'No result' };
     }
 
@@ -1372,9 +1385,12 @@ class GAPIWebSocketClient {
       if (!selector) {
         return { error: 'No selector provided. Pass "selector" in the request body.' };
       }
+      await chrome.storage.session.set({ _gapiArgs: { selector } });
       const results = await chrome.scripting.executeScript({
         target: { tabId },
-        func: (sel) => {
+        func: async () => {
+          const { _gapiArgs } = await chrome.storage.session.get('_gapiArgs');
+          const sel = _gapiArgs?.selector ?? null;
           try {
             const els = document.querySelectorAll(sel);
             if (els.length === 0) return { selector: sel, count: 0, elements: [] };
@@ -1399,9 +1415,9 @@ class GAPIWebSocketClient {
           } catch (e) {
             return { selector: sel, error: e.message };
           }
-        },
-        args: [selector]
+        }
       });
+      chrome.storage.session.remove('_gapiArgs');
       return results[0]?.result || { status: 'failed', reason: 'No result' };
     }
 
