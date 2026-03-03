@@ -6,6 +6,10 @@ import type {
   ApiKeyCreateResponse,
   ImageInfo,
   SiteConfig,
+  PagesResponse,
+  TabInspectResult,
+  NebulaFile,
+  ReloadResponse,
 } from './types';
 
 export class GapiError extends Error {
@@ -188,5 +192,64 @@ export class GapiClient {
 
   async deleteSiteConfig(id: string): Promise<void> {
     await this.request(`/v1/config/sites/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  // ========== Pages & Tabs ==========
+
+  async getPages(): Promise<PagesResponse> {
+    return this.request('/v1/pages');
+  }
+
+  async inspectTab(
+    tabId: number,
+    action: string,
+    payload?: Record<string, unknown>,
+  ): Promise<TabInspectResult> {
+    return this.request(`/v1/tabs/${encodeURIComponent(tabId)}/inspect`, {
+      method: 'POST',
+      body: JSON.stringify({ action, ...payload }),
+    });
+  }
+
+  async sendToTab(
+    tabId: number,
+    message: string,
+  ): Promise<{ status: string; message_id?: string }> {
+    return this.request(`/v1/tabs/${encodeURIComponent(tabId)}/send`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    });
+  }
+
+  async getTabResponse(tabId: number): Promise<TabInspectResult> {
+    return this.request(`/v1/tabs/${encodeURIComponent(tabId)}/get-response`, {
+      method: 'POST',
+    });
+  }
+
+  async navigateTab(tabId: number, url: string): Promise<{ status: string }> {
+    return this.request(`/v1/tabs/${encodeURIComponent(tabId)}/navigate`, {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    });
+  }
+
+  // ========== Nebula Files ==========
+
+  async getNebulaFiles(tabId: number): Promise<{ files: NebulaFile[] }> {
+    return this.request(`/v1/nebula/tabs/${encodeURIComponent(tabId)}/files`);
+  }
+
+  async getNebulaFileContent(tabId: number, fileId: string): Promise<{ content: string; file: NebulaFile }> {
+    return this.request(`/v1/nebula/tabs/${encodeURIComponent(tabId)}/files/${encodeURIComponent(fileId)}`);
+  }
+
+  // ========== Extension Reload ==========
+
+  async reloadExtension(mode: string): Promise<ReloadResponse> {
+    return this.request('/v1/extension/reload', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    });
   }
 }

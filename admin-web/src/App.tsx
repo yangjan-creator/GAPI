@@ -6,6 +6,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { ConversationsPage } from './pages/ConversationsPage';
 import { ApiKeysPage } from './pages/ApiKeysPage';
 import { SiteConfigPage } from './pages/SiteConfigPage';
+import { TabManagerPage } from './pages/TabManagerPage';
 
 const LS_KEY_API_KEY = 'gapi_admin_api_key';
 const LS_KEY_BASE_URL = 'gapi_admin_base_url';
@@ -84,6 +85,8 @@ export function App() {
         return client ? <ApiKeysPage client={client} /> : null;
       case 'site-config':
         return client ? <SiteConfigPage client={client} /> : null;
+      case 'tab-manager':
+        return client ? <TabManagerPage client={client} /> : null;
       case 'settings':
         return (
           <SettingsPage

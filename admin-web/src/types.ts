@@ -1,4 +1,4 @@
-export type PageId = 'conversations' | 'api-keys' | 'site-config' | 'settings';
+export type PageId = 'conversations' | 'api-keys' | 'site-config' | 'tab-manager' | 'settings';
 
 export interface ConversationMeta {
   id: string;
@@ -70,4 +70,39 @@ export interface StatusResponse {
   service: string;
   version: string;
   timestamp: number;
+}
+
+export interface ActivePage {
+  tab_id: number;
+  url: string;
+  title: string;
+  site_type: string;
+  favicon_url?: string;
+  last_seen: string;
+}
+
+export interface PagesResponse {
+  pages: ActivePage[];
+  meta: { total: number; connected_extensions: number };
+}
+
+export interface TabInspectResult {
+  status: string;
+  [key: string]: unknown;
+}
+
+export interface NebulaFile {
+  id: string;
+  filename: string;
+  file_extension: string;
+  size_bytes: number;
+  folder_path: string;
+  source: string;
+  created_at: string;
+}
+
+export interface ReloadResponse {
+  status: string;
+  mode: string;
+  note?: string;
 }

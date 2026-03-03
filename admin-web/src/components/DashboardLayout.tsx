@@ -10,6 +10,7 @@ const ALL_TABS: NavTab[] = [
   { id: 'conversations', label: '對話' },
   { id: 'api-keys', label: 'API Keys' },
   { id: 'site-config', label: '網站設定' },
+  { id: 'tab-manager', label: 'Tab Manager' },
   { id: 'settings', label: '設定' },
 ];
 
