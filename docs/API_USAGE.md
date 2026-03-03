@@ -38,10 +38,14 @@ Base URL: `http://localhost:18799`
 4. [完整操作範例：從零開始到收到回覆](#4-完整操作範例從零開始到收到回覆)
 5. [對話管理](#5-對話管理)
 6. [圖片管理](#6-圖片管理)
-7. [站點配置](#7-站點配置)
-8. [WebSocket 即時通訊](#8-websocket-即時通訊)
-9. [錯誤處理與速率限制](#9-錯誤處理與速率限制)
-10. [API Key 管理（長期使用）](#10-api-key-管理長期使用)
+7. [分頁控制](#7-分頁控制)
+8. [頁面檢查與資料擷取](#8-頁面檢查與資料擷取)
+9. [Nebula 整合](#9-nebula-整合)
+10. [Extension 管理](#10-extension-管理)
+11. [站點配置](#11-站點配置)
+12. [WebSocket 即時通訊](#12-websocket-即時通訊)
+13. [錯誤處理與速率限制](#13-錯誤處理與速率限制)
+14. [API Key 管理（長期使用）](#14-api-key-管理長期使用)
 
 ---
 
@@ -78,7 +82,7 @@ echo "Token: $TOKEN"
 
 Token 格式：`ext_{extension_id}_{timestamp}_{hmac_signature}`
 
-> Token 有效期約 1 小時。長期使用請建立 API Key（見第 10 節）。
+> Token 有效期約 1 小時。長期使用請建立 API Key（見第 14 節）。
 
 ### 驗證 Token 是否有效
 
@@ -552,7 +556,349 @@ curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ---
 
-## 7. 站點配置
+## 7. 分頁控制
+
+### 7.1 導航分頁到指定 URL
+
+讓指定分頁導航到新的 URL。Server 透過 WebSocket 將導航指令傳送給 Extension，Extension 再操作 Chrome 分頁。
+
+```bash
+curl -s -X POST http://localhost:18799/v1/tabs/1847205382/navigate \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://gemini.google.com/app"}' | python3 -m json.tool
+```
+
+回應範例：
+
+```json
+{
+    "command_id": "cmd_1772465500000_x1y2z3",
+    "status": "ok",
+    "result": {
+        "status": "success",
+        "tab_id": 1847205382,
+        "url": "https://gemini.google.com/app"
+    }
+}
+```
+
+#### POST /v1/tabs/{tab_id}/navigate 參數
+
+| 欄位 | 類型 | 必填 | 說明 |
+|------|------|------|------|
+| `url` | string | 是 | 要導航到的目標 URL |
+
+> `tab_id` 從 `GET /v1/pages` 取得。導航完成後，Extension 會自動回報分頁的新狀態。
+
+---
+
+## 8. 頁面檢查與資料擷取
+
+透過 `POST /v1/tabs/{tab_id}/inspect` 端點，可以對指定分頁執行各種檢查與資料擷取動作。
+
+### 8.1 擷取對話中的圖片
+
+從目前的對話頁面擷取所有圖片 URL。支援 Gemini、Claude 及一般網頁。
+
+```bash
+curl -s -X POST http://localhost:18799/v1/tabs/1847205382/inspect \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "EXTRACT_IMAGES"}' | python3 -m json.tool
+```
+
+回應範例：
+
+```json
+{
+    "command_id": "cmd_1772465510000_a1b2c3",
+    "status": "ok",
+    "result": {
+        "images": [
+            "https://lh3.googleusercontent.com/...",
+            "https://gemini.google.com/share/img/..."
+        ],
+        "count": 2,
+        "site": "gemini"
+    }
+}
+```
+
+### 8.2 自訂 CSS 查詢（customQuery）
+
+在指定分頁上執行自訂的 CSS 選擇器查詢，取得匹配元素的內容。
+
+```bash
+curl -s -X POST http://localhost:18799/v1/tabs/1847205382/inspect \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "customQuery", "selector": "div.response-content"}' | python3 -m json.tool
+```
+
+#### POST /v1/tabs/{tab_id}/inspect 參數
+
+| 欄位 | 類型 | 必填 | 說明 |
+|------|------|------|------|
+| `action` | string | 是 | 要執行的動作（見下方列表） |
+| `selector` | string | 視動作而定 | CSS 選擇器（`customQuery` 時必填） |
+
+#### 支援的 action 列表
+
+| action | 說明 | 適用站點 |
+|--------|------|----------|
+| `EXTRACT_IMAGES` | 擷取對話中的圖片 URL | Gemini、Claude、一般網頁 |
+| `inspectToolCalls` | 列出 Nebula 對話中的 tool calls | Nebula |
+| `expandToolCalls` | 展開並取得 tool calls 的完整內容 | Nebula |
+| `customQuery` | 執行自訂 CSS 選擇器查詢 | 所有站點 |
+
+> Nebula 專屬的 inspect 動作（`inspectToolCalls`、`expandToolCalls`）需要分頁開啟 `nebula.gg/chat/channel/*` 頁面。詳見第 9 節。
+
+---
+
+## 9. Nebula 整合
+
+GAPI 支援 [Nebula](https://nebula.gg) 平台的對話分頁。以下端點專門用於 Nebula 的檔案管理與工具呼叫檢查。
+
+> **前提條件**：目標分頁必須開啟 `nebula.gg/chat/channel/*` 頁面。先用 `GET /v1/pages` 確認有 Nebula 分頁，取得對應的 `tab_id`。
+
+### 9.1 列出 Nebula 討論串中的檔案
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:18799/v1/nebula/tabs/1847205400/files | python3 -m json.tool
+```
+
+回應範例：
+
+```json
+{
+    "files": [
+        {
+            "id": "file_abc123",
+            "filename": "main.py",
+            "file_extension": ".py",
+            "size_bytes": 2048,
+            "folder_path": "/src",
+            "source": "assistant",
+            "created_at": "2026-03-03T10:30:00Z"
+        },
+        {
+            "id": "file_def456",
+            "filename": "config.json",
+            "file_extension": ".json",
+            "size_bytes": 512,
+            "folder_path": "/",
+            "source": "user",
+            "created_at": "2026-03-03T10:28:00Z"
+        }
+    ],
+    "meta": {
+        "total": 2,
+        "tab_id": 1847205400
+    }
+}
+```
+
+#### 檔案欄位說明
+
+| 欄位 | 類型 | 說明 |
+|------|------|------|
+| `id` | string | 檔案唯一 ID |
+| `filename` | string | 檔案名稱 |
+| `file_extension` | string | 副檔名（含點號） |
+| `size_bytes` | number | 檔案大小（位元組） |
+| `folder_path` | string | 檔案在專案中的路徑 |
+| `source` | string | 來源：`user`（使用者上傳）或 `assistant`（AI 產生） |
+| `created_at` | string | 建立時間（ISO 8601） |
+
+### 9.2 取得 Nebula 檔案內容
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:18799/v1/nebula/tabs/1847205400/files/file_abc123 | python3 -m json.tool
+```
+
+回應範例（文字檔）：
+
+```json
+{
+    "id": "file_abc123",
+    "filename": "main.py",
+    "content": "import os\nimport sys\n\ndef main():\n    print('Hello from Nebula')\n\nif __name__ == '__main__':\n    main()\n",
+    "content_type": "text/plain"
+}
+```
+
+回應範例（JSON 檔）：
+
+```json
+{
+    "id": "file_def456",
+    "filename": "config.json",
+    "content": {
+        "debug": true,
+        "port": 8080
+    },
+    "content_type": "application/json"
+}
+```
+
+> 回應的 `content` 欄位類型取決於檔案類型：純文字檔回傳字串，JSON 檔回傳解析後的物件。
+
+### 9.3 檢查 Nebula 工具呼叫（Tool Calls）
+
+#### 列出工具呼叫
+
+```bash
+curl -s -X POST http://localhost:18799/v1/tabs/1847205400/inspect \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "inspectToolCalls"}' | python3 -m json.tool
+```
+
+回應範例：
+
+```json
+{
+    "command_id": "cmd_1772465520000_t1u2v3",
+    "status": "ok",
+    "result": {
+        "tool_calls": [
+            {
+                "index": 0,
+                "name": "create_file",
+                "summary": "建立 main.py"
+            },
+            {
+                "index": 1,
+                "name": "run_command",
+                "summary": "執行 python main.py"
+            }
+        ],
+        "count": 2
+    }
+}
+```
+
+#### 展開工具呼叫詳情
+
+```bash
+curl -s -X POST http://localhost:18799/v1/tabs/1847205400/inspect \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "expandToolCalls"}' | python3 -m json.tool
+```
+
+回應範例：
+
+```json
+{
+    "command_id": "cmd_1772465530000_w1x2y3",
+    "status": "ok",
+    "result": {
+        "tool_calls": [
+            {
+                "index": 0,
+                "name": "create_file",
+                "input": {
+                    "path": "/src/main.py",
+                    "content": "import os\n..."
+                },
+                "output": "File created successfully"
+            },
+            {
+                "index": 1,
+                "name": "run_command",
+                "input": {
+                    "command": "python main.py"
+                },
+                "output": "Hello from Nebula"
+            }
+        ],
+        "count": 2
+    }
+}
+```
+
+---
+
+## 10. Extension 管理
+
+### 10.1 重新載入 Extension
+
+提供三種模式重新載入 Extension，從輕量到完整重啟。
+
+```
+POST /v1/extension/reload
+```
+
+#### 模式 A：軟重載（soft）
+
+重新注入 Content Script 到所有分頁。需要 Extension 的 WebSocket 連線處於活躍狀態。
+
+```bash
+curl -s -X POST http://localhost:18799/v1/extension/reload \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "soft"}' | python3 -m json.tool
+```
+
+#### 模式 B：完整重載（full）
+
+呼叫 `chrome.runtime.reload()` 重新載入整個 Extension。需要 Extension 的 WebSocket 連線處於活躍狀態。
+
+```bash
+curl -s -X POST http://localhost:18799/v1/extension/reload \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "full"}' | python3 -m json.tool
+```
+
+#### 模式 C：硬重啟（hard）
+
+終止 Chrome 程序並重新啟動。這是最強力的模式，不需要 WebSocket 連線。可選擇性指定重啟後要開啟的頁面。
+
+```bash
+# 硬重啟，不指定頁面（Chrome 恢復上次的分頁）
+curl -s -X POST http://localhost:18799/v1/extension/reload \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "hard"}' | python3 -m json.tool
+
+# 硬重啟，指定要開啟的頁面
+curl -s -X POST http://localhost:18799/v1/extension/reload \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "hard",
+    "urls": [
+      "https://gemini.google.com/app",
+      "https://nebula.gg/chat/channel/my-project"
+    ]
+  }' | python3 -m json.tool
+```
+
+#### POST /v1/extension/reload 參數
+
+| 欄位 | 類型 | 必填 | 說明 |
+|------|------|------|------|
+| `mode` | string | 是 | 重載模式：`soft`、`full`、`hard` |
+| `urls` | string[] | 否 | `hard` 模式專用：重啟後要開啟的頁面 URL 列表 |
+
+#### 三種模式比較
+
+| 模式 | 需要連線 | 影響範圍 | 使用場景 |
+|------|----------|----------|----------|
+| `soft` | 是 | 僅 Content Script | Content Script 更新後重新注入 |
+| `full` | 是 | 整個 Extension | Extension 程式碼變更、Service Worker 異常 |
+| `hard` | 否 | Chrome + Extension | Extension 完全無回應、WebSocket 斷線無法恢復 |
+
+> **注意**：`hard` 模式會關閉所有 Chrome 視窗和分頁。確保已儲存工作後再使用。
+
+---
+
+## 11. 站點配置
 
 管理 Extension 的 DOM 選擇器配置（進階用途，一般不需要動）。
 
@@ -578,7 +924,7 @@ curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ---
 
-## 8. WebSocket 即時通訊
+## 12. WebSocket 即時通訊
 
 如果你需要即時接收 AI 回覆（不想 polling），可以用 WebSocket。
 
@@ -645,7 +991,7 @@ asyncio.run(realtime_chat())
 
 ---
 
-## 9. 錯誤處理與速率限制
+## 13. 錯誤處理與速率限制
 
 ### HTTP 狀態碼
 
@@ -667,7 +1013,7 @@ asyncio.run(realtime_chat())
 
 ---
 
-## 10. API Key 管理（長期使用）
+## 14. API Key 管理（長期使用）
 
 Token 約 1 小時過期。如果你的腳本要長期運行，建立 API Key 更方便。
 
@@ -739,6 +1085,11 @@ curl -s -X POST "http://localhost:18799/v1/auth/api-keys/validate?api_key=gapi_x
 | `/v1/images/{id}` | GET | 需要 | 下載圖片 |
 | `/v1/images` | GET | 需要 | 圖片列表 |
 | `/v1/images/{id}` | DELETE | 需要 | 刪除圖片 |
+| `/v1/tabs/{tab_id}/navigate` | POST | 需要 | **導航分頁到指定 URL** |
+| `/v1/tabs/{tab_id}/inspect` | POST | 需要 | **頁面檢查與資料擷取** |
+| `/v1/nebula/tabs/{tab_id}/files` | GET | 需要 | **列出 Nebula 檔案** |
+| `/v1/nebula/tabs/{tab_id}/files/{file_id}` | GET | 需要 | **取得 Nebula 檔案內容** |
+| `/v1/extension/reload` | POST | 需要 | **重新載入 Extension** |
 | `/v1/config/sites` | GET/POST | 需要 | 站點配置 |
 | `/v1/config/sites/{id}` | DELETE | 需要 | 刪除站點配置 |
 | `/v1/bridge` | POST | 不需要 | CDP 橋接（Legacy） |
