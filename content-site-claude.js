@@ -1,11 +1,23 @@
 // Claude Site Adapter
-// Researched selectors for claude.ai DOM structure (as of 2025).
-// Claude uses React with Tailwind CSS. Key patterns:
-//   - Conversation turns: data-testid="human-turn" / data-testid="ai-turn"
-//   - Message content: .font-claude-message for assistant prose
-//   - Input: ProseMirror contenteditable div with data-placeholder attribute
-//   - Send button: button with aria-label="Send Message" (capital M) or data-testid="send-button"
-//   - Sidebar: nav > ol/ul > li > a[href*="/chat/"]
+// Full adapter for claude.ai DOM extraction and interaction.
+//
+// Claude.ai uses React with Tailwind CSS and a ProseMirror-based input editor.
+// Key DOM patterns (researched from live inspections and open-source exporters):
+//
+//   Conversation URL : https://claude.ai/chat/{uuid}
+//   New conversation : https://claude.ai/new
+//   Message turns    : [role="group"][aria-label="Message actions"] distinguishes
+//                      human vs. assistant by presence of a feedback button.
+//   Title            : [data-testid="chat-title-button"] .truncate
+//   Input            : div.ProseMirror[contenteditable="true"]
+//   Send button      : button[data-testid="send-button"] or aria-label="Send Message"
+//   Sidebar          : nav a[href*="/chat/"]
+//   API endpoint     : /api/organizations/{orgId}/chat_conversations/{id}?tree=true
+//   Org cookie       : lastActiveOrg={orgId}
+//
+// Because Claude's React app may change class names across deploys, every
+// selector list uses multiple fallbacks ordered from most-specific to broadest.
+// All public methods return null/empty rather than throwing when selectors miss.
 
 (function() {
   'use strict';
@@ -15,7 +27,7 @@
     label: 'Claude',
     hostPatterns: ['claude.ai'],
 
-    // ========== URL 工具 ==========
+    // ========== URL Utilities ==========
 
     isOnSite(url) {
       return (url || '').includes('claude.ai');
@@ -25,7 +37,7 @@
       try {
         if (!url) return null;
         // Claude URL: https://claude.ai/chat/{uuid}
-        const m = url.match(/\/chat\/([^/?#]+)/);
+        const m = url.match(/\/chat\/([0-9a-f-]{36}|[^/?#]+)/);
         return (m && m[1]) ? m[1] : null;
       } catch {
         return null;
@@ -35,53 +47,111 @@
     parseConversationFromUrl(url) {
       if (!url || !this.isOnSite(url)) return null;
       const chatId = this.getChatIdFromUrl(url);
-      const isChatPage = url.includes('/chat');
+      const isChatPage = /\/chat(\/|$)/.test(url) || url.includes('/new');
       return { chatId, isAppPage: isChatPage };
     },
 
-    // ========== 用戶偵測 ==========
+    // ========== User Detection ==========
 
     detectUserProfile() {
-      // Claude does not use multi-account switching; return null.
-      return null;
+      // Claude does not expose multi-account switching in the DOM in the same
+      // way as Google (no /u/N/ path). We attempt to detect the active
+      // organization ID from cookies, which serves as an account identifier.
+      try {
+        // Strategy 1: Extract org ID from lastActiveOrg cookie
+        const orgMatch = (document.cookie || '').match(/lastActiveOrg=([^;]+)/);
+        if (orgMatch && orgMatch[1]) {
+          return orgMatch[1].substring(0, 20);
+        }
+
+        // Strategy 2: Look for user avatar or account menu elements
+        const avatarSelectors = [
+          'button[data-testid="user-menu"] img',
+          'button[data-testid="user-button"] img',
+          '[data-testid="avatar"]',
+          'img[alt*="@"]',
+          '[aria-label*="Account"]',
+          '[aria-label*="Profile"]',
+          '[aria-label*="User menu"]'
+        ];
+
+        for (const selector of avatarSelectors) {
+          try {
+            const el = document.querySelector(selector);
+            if (el) {
+              const alt = el.getAttribute('alt') || '';
+              const ariaLabel = el.getAttribute('aria-label') || '';
+              const emailMatch = (alt + ' ' + ariaLabel).match(
+                /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/
+              );
+              if (emailMatch && emailMatch[1]) {
+                return emailMatch[1].split('@')[0].replace(/[^a-zA-Z0-9]/g, '_');
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        return null;
+      } catch (error) {
+        console.error('[ClaudeAdapter] detectUserProfile error:', error);
+        return null;
+      }
     },
 
-    // ========== DOM Selector 陣列 ==========
+    // ========== DOM Selector Arrays ==========
 
     // User message turn containers.
-    // Claude wraps each turn in a div identified by data-testid="human-turn".
-    // Fallback: the inner .font-human-message element or any element marked
-    // with [data-is-human-turn] that React may set.
+    // Claude wraps each conversation turn in a container. Human turns can be
+    // identified by data-testid attributes or by the absence of a feedback
+    // button inside the message action group.
     userMessageSelectors: [
-      // 2026 DOM: data-testid based
+      // data-testid based (most stable across deploys)
       '[data-testid="user-message"]',
       '[data-testid="human-turn"]',
-      // Older builds
+      '[data-testid="user-turn"]',
+      // Attribute-based variants
       '[data-human-turn="true"]',
-      // Class-based fallback
-      '[class*="human-turn"]',
-      // Generic role-based fallbacks
+      '[data-is-human-message="true"]',
+      // Role-based (React/ARIA patterns)
       '[data-role="user"]',
-      '[data-message-author-role="user"]'
+      '[data-message-author-role="user"]',
+      '[data-sender="human"]',
+      // Class-based fallbacks (Tailwind utility classes)
+      '[class*="human-turn"]',
+      '[class*="human-message"]',
+      '[class*="user-message"]',
+      '[class*="user-turn"]'
     ],
 
     // Assistant (model) response turn containers.
-    // The outer wrapper uses data-testid="ai-turn"; the rich prose content
-    // inside uses the Tailwind utility class "font-claude-message".
+    // Claude's assistant responses often contain a ".font-claude-message" class
+    // for the prose content and can be identified by the presence of a feedback
+    // (thumbs-up) button in the action bar.
     modelResponseSelectors: [
-      // 2026 DOM: class-based response containers
-      '[class*="response"]',
-      // data-testid based (may return in future builds)
+      // data-testid based
       '[data-testid="ai-turn"]',
-      // Older attribute variant
+      '[data-testid="assistant-turn"]',
+      '[data-testid="assistant-message"]',
+      '[data-testid="claude-message"]',
+      // Attribute-based variants
       '[data-ai-turn="true"]',
-      // Class-based fallback
-      '[class*="ai-turn"]',
-      // Tailwind utility class (older builds)
-      '.font-claude-message',
-      // Generic role-based fallbacks
+      '[data-is-ai-message="true"]',
+      // Role-based
       '[data-role="assistant"]',
-      '[data-message-author-role="assistant"]'
+      '[data-message-author-role="assistant"]',
+      '[data-sender="assistant"]',
+      // Tailwind class: font-claude-message (stable across many builds)
+      '.font-claude-message',
+      // Class-based fallbacks
+      '[class*="ai-turn"]',
+      '[class*="ai-message"]',
+      '[class*="assistant-turn"]',
+      '[class*="assistant-message"]',
+      '[class*="claude-message"]',
+      // Broader fallback: response containers
+      '[class*="response-content"]'
     ],
 
     // Input selectors for the ProseMirror contenteditable composer.
@@ -93,8 +163,15 @@
       'div.ProseMirror[contenteditable="true"]',
       // The wrapper div that carries the placeholder attribute
       'div[contenteditable="true"][data-placeholder]',
+      // data-testid based
+      '[data-testid="composer-input"] [contenteditable="true"]',
+      '[data-testid="chat-input"] [contenteditable="true"]',
       // Broader fallback: any contenteditable textbox role
       'div[contenteditable="true"][role="textbox"]',
+      // Textarea fallback (in case Claude switches away from ProseMirror)
+      'textarea[placeholder*="message" i]',
+      'textarea[placeholder*="Claude" i]',
+      'textarea[aria-label*="message" i]',
       // Widest fallback
       'div[contenteditable="true"]'
     ],
@@ -108,33 +185,72 @@
       // aria-label variations (Claude uses "Send Message" with capital M)
       'button[aria-label="Send Message"]',
       'button[aria-label="Send message"]',
+      'button[aria-label="Send"]',
       // Broader aria-label partial match
       'button[aria-label*="Send"]',
       // Fallback: submit button in the composer form
+      'form button[type="submit"]',
       'button[type="submit"]'
+    ],
+
+    // Stop generation button selectors.
+    // Used by waitForResponse to detect when Claude is still generating.
+    stopButtonSelectors: [
+      'button[data-testid="stop-button"]',
+      'button[aria-label="Stop generating"]',
+      'button[aria-label="Stop"]',
+      'button[aria-label*="Stop"]',
+      'button[aria-label*="stop"]',
+      '[class*="stop-button"]'
     ],
 
     // Quick scraper selector for GET_LAST_RESPONSE operations.
     // Targets the prose content of the last assistant turn.
     // .font-claude-message is a stable Tailwind class applied to Claude's
     // response text across UI versions.
-    scraperSelector: '[class*="response"]',
+    scraperSelector:
+      '.font-claude-message, ' +
+      '[data-testid="ai-turn"], ' +
+      '[data-testid="assistant-message"], ' +
+      '[data-role="assistant"], ' +
+      '[class*="assistant-message"], ' +
+      '[class*="ai-turn"]',
 
     // ========== Debug Selectors ==========
     // Used by the debug panel to show matching elements and counts.
     debugSelectors: [
+      // Human/user message selectors
+      '[data-testid="user-message"]',
       '[data-testid="human-turn"]',
-      '[data-testid="ai-turn"]',
-      '.font-claude-message',
       '[data-role="user"]',
-      '[data-role="assistant"]',
       '[data-message-author-role="user"]',
-      '[data-message-author-role="assistant"]',
+      '[data-sender="human"]',
       '[class*="human-turn"]',
-      '[class*="ai-turn"]'
+      '[class*="user-message"]',
+      // Assistant/AI message selectors
+      '[data-testid="ai-turn"]',
+      '[data-testid="assistant-message"]',
+      '[data-role="assistant"]',
+      '[data-message-author-role="assistant"]',
+      '[data-sender="assistant"]',
+      '.font-claude-message',
+      '[class*="ai-turn"]',
+      '[class*="assistant-message"]',
+      // Message action groups (verified from claude-chat-exporter)
+      '[role="group"][aria-label="Message actions"]',
+      // Title
+      '[data-testid="chat-title-button"]',
+      // Copy button
+      'button[data-testid="action-bar-copy"]',
+      // Feedback button (assistant-only indicator)
+      'button[aria-label="Give positive feedback"]',
+      // Input
+      'div.ProseMirror[contenteditable="true"]',
+      // Send button
+      'button[data-testid="send-button"]'
     ],
 
-    // ========== 打字模擬配置 ==========
+    // ========== Typing Simulation Config ==========
     typingConfig: {
       nearbyKeys: {
         'a':'sq','b':'vn','c':'xv','d':'sf','e':'wr','f':'dg','g':'fh',
@@ -150,35 +266,54 @@
       burstDelay: [20, 60]
     },
 
-    // ========== URL 與對話偵測 ==========
+    // ========== URL and Conversation Detection ==========
 
     // Claude does not embed the conversation ID in DOM data attributes in a
-    // standardised way, so this list is speculative. The URL is the primary
-    // source via getChatIdFromUrl().
-    conversationIdAttributes: ['data-conversation-id'],
+    // standardised way, so URL is the primary source via getChatIdFromUrl().
+    // These attributes are speculative fallbacks.
+    conversationIdAttributes: [
+      'data-conversation-id',
+      'data-chat-id',
+      'data-conversation-uuid'
+    ],
 
     // Selector that confirms the page contains chat messages.
     // Matches if at least one human or AI turn is present.
-    hasMessagesSelector: '[data-testid="human-turn"], [data-testid="ai-turn"]',
+    // Uses multiple fallback strategies to handle DOM changes.
+    hasMessagesSelector:
+      '[data-testid="human-turn"], ' +
+      '[data-testid="ai-turn"], ' +
+      '[data-testid="user-message"], ' +
+      '[data-testid="assistant-message"], ' +
+      '[data-role="user"], ' +
+      '[data-role="assistant"], ' +
+      '.font-claude-message, ' +
+      '[role="group"][aria-label="Message actions"]',
 
     appPathPattern: '/chat',
 
     chatIdFromDOM() {
-      // Try conversationIdAttributes first (usually not present on claude.ai,
-      // but kept as a safety fallback).
+      // Strategy 1: Try data attributes on DOM elements
       for (const attr of this.conversationIdAttributes) {
-        const el = document.querySelector(`[${attr}]`);
-        if (el) {
-          return el.getAttribute(attr);
+        try {
+          const el = document.querySelector(`[${attr}]`);
+          if (el) {
+            const value = el.getAttribute(attr);
+            if (value) return value;
+          }
+        } catch {
+          continue;
         }
       }
-      return null;
+
+      // Strategy 2: Extract from the current URL as fallback
+      return this.getChatIdFromUrl(window.location.href);
     },
 
-    // ========== 標題提取 ==========
+    // ========== Title Extraction ==========
 
     // Returns the CSS selector for the sidebar link to a specific chat.
-    // When chatId is empty, returns the selector matching ALL chat links
+    // When chatId is empty/null, returns the selector matching ALL chat links
     // (used by the engine to enumerate all conversations).
     sidebarLinkSelector(chatId) {
       if (!chatId) {
@@ -187,15 +322,32 @@
       return `a[href*="/chat/${chatId}"]`;
     },
 
+    // Title element selectors (the title displayed in the header/sidebar).
+    // Verified from claude-chat-exporter: data-testid="chat-title-button"
+    // contains a .truncate child with the title text.
+    titleSelectors: [
+      '[data-testid="chat-title-button"] .truncate',
+      'button[data-testid="chat-title-button"] div.truncate',
+      '[data-testid="chat-title-button"]',
+      '[data-testid="conversation-title"]',
+      'h1[class*="title"]',
+      'header [class*="title"]'
+    ],
+
     // Sidebar conversation list container selectors.
     // Claude renders conversations in a nav element containing an ordered or
     // unordered list of anchor tags pointing to /chat/{uuid}.
     sidebarContainerSelectors: [
       // Primary: nav-scoped links (most reliable)
       'nav a[href*="/chat/"]',
-      // Fallback: any sidebar-like list with chat links
+      // Sidebar with specific data attributes
+      '[data-testid="sidebar"] a[href*="/chat/"]',
+      '[data-testid="conversation-list"] a[href*="/chat/"]',
+      // Class-based fallbacks
       '[class*="sidebar"] a[href*="/chat/"]',
       '[class*="conversation-list"] a[href*="/chat/"]',
+      '[class*="chat-list"] a[href*="/chat/"]',
+      // Generic list-based fallbacks
       'ol a[href*="/chat/"]',
       'ul a[href*="/chat/"]'
     ],
@@ -210,10 +362,13 @@
         `a[href*="${path}"][aria-current="page"]`,
         // Fallback: parent element marked as current
         `[aria-current="page"] a[href*="${path}"]`,
+        // data-testid based active state
+        `[data-testid="active-conversation"] a[href*="${path}"]`,
         // Class-based: React may apply bg-* or text-* classes to active items
         `[aria-selected="true"] a[href*="${path}"]`,
         `[class*="active"] a[href*="${path}"]`,
-        `[class*="selected"] a[href*="${path}"]`
+        `[class*="selected"] a[href*="${path}"]`,
+        `[class*="current"] a[href*="${path}"]`
       ];
     },
 
@@ -223,9 +378,13 @@
       'Claude',
       'New chat',
       'New Chat',
+      'New conversation',
+      'New Conversation',
       'Untitled',
+      'Untitled conversation',
       'Start a new chat',
-      'Chat'
+      'Chat',
+      'claude.ai'
     ],
 
     // Navigation UI text to exclude from title extraction.
@@ -241,10 +400,60 @@
       'Today',
       'Yesterday',
       'Previous 7 days',
-      'Previous 30 days'
+      'Previous 30 days',
+      'Older',
+      'Projects',
+      'Home',
+      'Search',
+      'New chat'
     ],
 
-    // ========== ProseMirror 訊息發送 ==========
+    // ========== Message Differentiation ==========
+    //
+    // Claude.ai uses [role="group"][aria-label="Message actions"] for each
+    // message's action bar. Human and Claude action bars are structurally
+    // identical EXCEPT that Claude's bars include a thumbs-up feedback button:
+    //   button[aria-label="Give positive feedback"]
+    //
+    // This is used as a secondary heuristic when data-testid or data-role
+    // selectors do not match (DOM refresh may remove those attributes).
+
+    /**
+     * Given a message action group element, determine if it belongs to an
+     * assistant (Claude) response.
+     * @param {Element} actionGroup - An element matching [role="group"][aria-label="Message actions"]
+     * @returns {boolean}
+     */
+    isAssistantActionGroup(actionGroup) {
+      if (!actionGroup) return false;
+      return !!actionGroup.querySelector('button[aria-label="Give positive feedback"]');
+    },
+
+    /**
+     * Get all message action groups on the page, split into human and assistant.
+     * Each group is associated with its closest ancestor message container.
+     * @returns {{ human: Element[], assistant: Element[] }}
+     */
+    getMessageGroups() {
+      const groups = { human: [], assistant: [] };
+      try {
+        const actionGroups = document.querySelectorAll(
+          '[role="group"][aria-label="Message actions"]'
+        );
+        actionGroups.forEach(group => {
+          if (this.isAssistantActionGroup(group)) {
+            groups.assistant.push(group);
+          } else {
+            groups.human.push(group);
+          }
+        });
+      } catch (error) {
+        console.error('[ClaudeAdapter] getMessageGroups error:', error);
+      }
+      return groups;
+    },
+
+    // ========== ProseMirror Message Sending ==========
     // Claude uses a ProseMirror-based rich text editor. Standard DOM
     // manipulation (execCommand, textContent, InputEvent) does NOT work
     // because ProseMirror maintains its own internal document model and
@@ -274,14 +483,18 @@
       // --- Step 1: Find the ProseMirror editor element ---
       let editor = null;
       for (const sel of this.inputSelectors) {
-        const el = document.querySelector(sel);
-        if (el) {
-          const rect = el.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            editor = el;
-            log('info', 'Found editor via selector:', sel);
-            break;
+        try {
+          const el = document.querySelector(sel);
+          if (el) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              editor = el;
+              log('info', 'Found editor via selector:', sel);
+              break;
+            }
           }
+        } catch {
+          continue;
         }
       }
 
@@ -416,14 +629,18 @@
       log('info', 'Looking for send button...');
       let sendBtn = null;
       for (const sel of this.sendButtonSelectors) {
-        const btn = document.querySelector(sel);
-        if (btn) {
-          const rect = btn.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            sendBtn = btn;
-            log('info', 'Found send button via selector:', sel);
-            break;
+        try {
+          const btn = document.querySelector(sel);
+          if (btn) {
+            const rect = btn.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              sendBtn = btn;
+              log('info', 'Found send button via selector:', sel);
+              break;
+            }
           }
+        } catch {
+          continue;
         }
       }
 
@@ -481,17 +698,229 @@
       return { success: false, reason: 'Input not cleared after submit — message may not have been sent' };
     },
 
-    // ========== 圖片提取 ==========
-    // Claude (as of 2025) does not support AI-generated image output in the
-    // same way as Gemini (no DALL-E equivalent). Set to null to skip.
+    // ========== Response Completion Detection ==========
+
+    /**
+     * Detect whether Claude has finished generating a response.
+     * Checks for the absence of a stop button and streaming indicators.
+     * @returns {boolean} true if Claude appears to have finished responding
+     */
+    isResponseComplete() {
+      try {
+        // Check if a stop button is present (indicates active generation)
+        for (const sel of this.stopButtonSelectors) {
+          try {
+            const btn = document.querySelector(sel);
+            if (btn) {
+              const rect = btn.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                return false; // Stop button visible = still generating
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        // Check for streaming/thinking indicators
+        const streamingSelectors = [
+          '[class*="streaming"]',
+          '[class*="thinking"]',
+          '[data-is-streaming="true"]',
+          '[data-testid="thinking-indicator"]',
+          '.animate-pulse',
+          '[class*="cursor-blink"]',
+          '[class*="typing-indicator"]'
+        ];
+
+        for (const sel of streamingSelectors) {
+          try {
+            const el = document.querySelector(sel);
+            if (el) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                return false; // Streaming indicator visible
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        return true; // No generation indicators found
+      } catch {
+        return true; // Assume complete on error
+      }
+    },
+
+    /**
+     * Wait for Claude to finish responding. Polls isResponseComplete() with
+     * increasing intervals until the response is done or timeout is reached.
+     * @param {number} [timeoutMs=120000] - Maximum wait time in milliseconds
+     * @param {number} [pollIntervalMs=500] - Initial polling interval
+     * @returns {Promise<boolean>} true if response completed, false if timed out
+     */
+    async waitForResponse(timeoutMs = 120000, pollIntervalMs = 500) {
+      const startTime = Date.now();
+      let interval = pollIntervalMs;
+
+      // First, wait for generation to start (the stop button to appear)
+      // This avoids returning immediately before Claude begins responding
+      let generationStarted = false;
+      const startWaitLimit = Math.min(10000, timeoutMs / 2);
+
+      while (Date.now() - startTime < startWaitLimit) {
+        if (!this.isResponseComplete()) {
+          generationStarted = true;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      if (!generationStarted) {
+        // Generation may have already completed very quickly, or never started.
+        // Check if there are any message action groups (indicating a response exists).
+        const hasMessages = document.querySelector(this.hasMessagesSelector);
+        if (hasMessages) {
+          return true; // There are messages on the page; response may already be done
+        }
+      }
+
+      // Now wait for generation to complete
+      while (Date.now() - startTime < timeoutMs) {
+        if (this.isResponseComplete()) {
+          // Double-check after a short delay to avoid premature detection
+          // (e.g., brief pause between streaming chunks)
+          await new Promise(r => setTimeout(r, 1000));
+          if (this.isResponseComplete()) {
+            return true;
+          }
+        }
+        await new Promise(r => setTimeout(r, interval));
+        // Gradually increase polling interval to reduce CPU usage
+        interval = Math.min(interval * 1.2, 2000);
+      }
+
+      console.warn('[ClaudeAdapter] waitForResponse timed out after', timeoutMs, 'ms');
+      return false;
+    },
+
+    // ========== Title Extraction (API-based) ==========
+
+    /**
+     * Attempt to extract the conversation title using Claude's internal API.
+     * This is more reliable than DOM scraping as Claude's API returns the
+     * canonical conversation name.
+     * @param {string} [chatId] - Conversation UUID; defaults to current URL
+     * @returns {Promise<string|null>} The conversation title or null
+     */
+    async fetchTitleFromAPI(chatId) {
+      try {
+        const id = chatId || this.getChatIdFromUrl(window.location.href);
+        if (!id) return null;
+
+        const orgMatch = (document.cookie || '').match(/lastActiveOrg=([^;]+)/);
+        if (!orgMatch || !orgMatch[1]) return null;
+
+        const orgId = orgMatch[1];
+        const url = `/api/organizations/${orgId}/chat_conversations/${id}?tree=true&rendering_mode=messages&render_all_tools=true`;
+
+        const response = await fetch(url, {
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        return (data && data.name) ? data.name.trim() : null;
+      } catch {
+        return null;
+      }
+    },
+
+    /**
+     * Extract conversation title from DOM elements.
+     * Uses the verified data-testid="chat-title-button" selector first,
+     * then falls back to sidebar link text.
+     * @returns {string|null}
+     */
+    extractTitleFromDOM() {
+      try {
+        // Strategy 1: Use title element selectors (verified from chat-exporter)
+        for (const sel of this.titleSelectors) {
+          try {
+            const el = document.querySelector(sel);
+            if (el) {
+              const text = (el.textContent || el.innerText || '').trim();
+              if (text && text.length >= 2 && text.length <= 300) {
+                // Check if it is a generic/brand title
+                const isGeneric = this.genericTitlePatterns.some(
+                  pattern => text.toLowerCase() === pattern.toLowerCase()
+                );
+                if (!isGeneric) {
+                  return text;
+                }
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        // Strategy 2: Use document.title (Claude sets it to the conversation name)
+        const docTitle = (document.title || '').trim();
+        if (docTitle) {
+          // Claude's document.title is often "conversation name - Claude"
+          // Strip the " - Claude" suffix
+          const stripped = docTitle.replace(/\s*[-|]\s*Claude\s*$/i, '').trim();
+          if (stripped && stripped.length >= 2 && stripped.length <= 300) {
+            const isGeneric = this.genericTitlePatterns.some(
+              pattern => stripped.toLowerCase() === pattern.toLowerCase()
+            );
+            if (!isGeneric) {
+              return stripped;
+            }
+          }
+        }
+
+        return null;
+      } catch {
+        return null;
+      }
+    },
+
+    // ========== Image Extraction ==========
+    // Claude (as of 2026) does not generate images in the same way as Gemini
+    // (no DALL-E/Imagen equivalent). However, users may upload images, and
+    // Claude may display image attachments. These selectors handle user-uploaded
+    // images that appear in the conversation.
 
     generatedImageSelector: null,
-    isGeneratedImage() { return false; },
-    extractImageId() { return null; },
-    imageDownloadSelectors: []
+
+    isGeneratedImage() {
+      return false;
+    },
+
+    extractImageId() {
+      return null;
+    },
+
+    imageDownloadSelectors: [],
+
+    // Selectors for user-uploaded image attachments in conversation turns.
+    // These are not AI-generated but may need extraction for conversation export.
+    uploadedImageSelectors: [
+      '[data-testid="file-thumbnail"] img',
+      '[data-testid="attachment-thumbnail"] img',
+      '[class*="attachment"] img',
+      '[class*="uploaded-image"] img',
+      '[class*="file-preview"] img',
+      'img[class*="attachment"]'
+    ]
   };
 
-  // 註冊到 SiteRegistry
+  // Register with SiteRegistry
   if (window.__GAPI_SiteRegistry) {
     window.__GAPI_SiteRegistry.register('claude', ClaudeAdapter);
   } else {
