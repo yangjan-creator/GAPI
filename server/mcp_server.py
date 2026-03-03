@@ -57,6 +57,11 @@ ALLOWED_ORIGINS = os.environ.get(
     "http://localhost:5173,chrome-extension://*"
 ).split(",")
 
+# Flag: after a hard reload (Chrome kill+reopen), the next extension that
+# reconnects should receive an automatic full reload so the service worker
+# recompiles from disk instead of using cached bytecode.
+pending_full_reload = False
+
 # ========== Lifespan ==========
 @asynccontextmanager
 async def lifespan(app):
@@ -767,6 +772,21 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             "payload": {"session_id": session_id, "expires_at": expires_at}
         }))
 
+        # After a hard reload, send a full reload command so the service
+        # worker recompiles from disk instead of using cached bytecode.
+        global pending_full_reload
+        if pending_full_reload:
+            pending_full_reload = False
+            logger.info(
+                "Sending post-hard-reload full reload to session=%s",
+                session_id
+            )
+            await asyncio.sleep(1)  # brief delay to let extension settle
+            await websocket.send_text(json.dumps({
+                "type": "reload_extension",
+                "payload": {"mode": "full"}
+            }))
+
         # Message loop
         while True:
             data = await websocket.receive_text()
@@ -1452,6 +1472,7 @@ async def reload_extension(data: ReloadRequest = ReloadRequest(), auth=Depends(v
         }
 
     if data.mode == "hard":
+        global pending_full_reload
         import subprocess, shutil
         urls = data.urls or ["https://gemini.google.com"]
         try:
@@ -1471,12 +1492,16 @@ async def reload_extension(data: ReloadRequest = ReloadRequest(), auth=Depends(v
         except Exception as e:
             logger.error("Hard reload failed: %s", e)
             raise HTTPException(status_code=500, detail=f"Hard reload failed: {e}")
+        # Set flag so next WS reconnect triggers a full reload to recompile
+        # the service worker from disk (Chrome caches bytecode after restart).
+        pending_full_reload = True
+        logger.info("Hard reload: pending_full_reload flag set")
         return {
             "status": "ok",
             "mode": "hard",
             "message": "Chrome restarted",
             "urls": urls,
-            "note": "Extension will auto-load and reconnect"
+            "note": "Extension will auto-load, reconnect, then receive a full reload to recompile service worker"
         }
 
     # Soft mode: reinject content scripts via WebSocket
