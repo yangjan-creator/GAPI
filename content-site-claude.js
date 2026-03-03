@@ -53,12 +53,14 @@
     // Fallback: the inner .font-human-message element or any element marked
     // with [data-is-human-turn] that React may set.
     userMessageSelectors: [
+      // 2026 DOM: data-testid based
+      '[data-testid="user-message"]',
       '[data-testid="human-turn"]',
-      // Older builds used a different attribute name
+      // Older builds
       '[data-human-turn="true"]',
-      // Class-based fallback — Claude's Tailwind bundle includes human-turn
+      // Class-based fallback
       '[class*="human-turn"]',
-      // Generic role-based fallbacks used by some Claude builds
+      // Generic role-based fallbacks
       '[data-role="user"]',
       '[data-message-author-role="user"]'
     ],
@@ -67,12 +69,15 @@
     // The outer wrapper uses data-testid="ai-turn"; the rich prose content
     // inside uses the Tailwind utility class "font-claude-message".
     modelResponseSelectors: [
+      // 2026 DOM: class-based response containers
+      '[class*="response"]',
+      // data-testid based (may return in future builds)
       '[data-testid="ai-turn"]',
       // Older attribute variant
       '[data-ai-turn="true"]',
       // Class-based fallback
       '[class*="ai-turn"]',
-      // The prose content container is the most reliable inner target
+      // Tailwind utility class (older builds)
       '.font-claude-message',
       // Generic role-based fallbacks
       '[data-role="assistant"]',
@@ -113,7 +118,7 @@
     // Targets the prose content of the last assistant turn.
     // .font-claude-message is a stable Tailwind class applied to Claude's
     // response text across UI versions.
-    scraperSelector: '.font-claude-message',
+    scraperSelector: '[class*="response"]',
 
     // ========== Debug Selectors ==========
     // Used by the debug panel to show matching elements and counts.

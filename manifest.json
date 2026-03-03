@@ -48,12 +48,14 @@
     {
       "matches": [
         "https://gemini.google.com/*",
-        "https://claude.ai/*"
+        "https://claude.ai/*",
+        "https://www.nebula.gg/*"
       ],
       "js": [
         "content-site-registry.js",
         "content-site-gemini.js",
         "content-site-claude.js",
+        "content-site-nebula.js",
         "content.js"
       ],
       "run_at": "document_idle"

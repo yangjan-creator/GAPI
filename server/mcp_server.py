@@ -1156,6 +1156,47 @@ async def get_tab_response(tab_id: int, auth=Depends(verify_auth)):
         raise HTTPException(status_code=504, detail="Extension did not respond in time")
 
 
+class InspectRequest(BaseModel):
+    action: str = "inspectDOM"
+
+@app.post("/v1/tabs/{tab_id}/inspect")
+async def inspect_tab_dom(tab_id: int, body: InspectRequest = None, auth=Depends(verify_auth)):
+    """Inspect DOM selectors on a browser tab for debugging."""
+    inspect_action = body.action if body else "inspectDOM"
+    ext_id = manager.find_extension_for_tab(tab_id)
+    if not ext_id:
+        # Fallback: try any connected extension (for tabs not yet in adapter registry)
+        if manager.extension_to_session:
+            ext_id = next(iter(manager.extension_to_session))
+        else:
+            raise HTTPException(status_code=404, detail="No extension connected")
+
+    command_id = f"cmd_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+
+    sent = await manager.send_to_extension(ext_id, {
+        "type": "tab_command",
+        "payload": {
+            "command_id": command_id,
+            "tab_id": tab_id,
+            "action": inspect_action
+        }
+    })
+
+    if not sent:
+        raise HTTPException(status_code=502, detail="Extension WebSocket not available")
+
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    pending_tab_commands[command_id] = future
+
+    try:
+        result = await asyncio.wait_for(future, timeout=10)
+        return {"command_id": command_id, "status": "ok", "result": result}
+    except asyncio.TimeoutError:
+        pending_tab_commands.pop(command_id, None)
+        raise HTTPException(status_code=504, detail="Extension did not respond in time")
+
+
 @app.get("/v1/tabs/{tab_id}/info")
 async def get_tab_info(tab_id: int, auth=Depends(verify_auth)):
     """Get conversation info (chatId, title) from a browser tab."""

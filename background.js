@@ -543,6 +543,8 @@ class GAPIWebSocketClient {
         const tab = await chrome.tabs.create({ url });
         console.log(`[GAPI-WS] Created tab ${tab.id} → ${url}`);
         sendResult({ success: true, data: { tab_id: tab.id, url } });
+        // Sync pages after creating tab (delayed to allow content script injection)
+        setTimeout(() => this.syncPages(), 5000);
       } catch (err) {
         console.error('[GAPI-WS] createTab failed:', err);
         sendResult({ success: false, error: err.message });
@@ -550,9 +552,9 @@ class GAPIWebSocketClient {
       return;
     }
 
-    // GET_LAST_RESPONSE: always use direct execution (chrome.scripting)
+    // GET_LAST_RESPONSE / inspect*: always use direct execution (chrome.scripting)
     // SEND_MESSAGE: use content script handler (more reliable for framework state)
-    if (action === 'GET_LAST_RESPONSE') {
+    if (action === 'GET_LAST_RESPONSE' || action === 'inspectDOM' || action === 'inspectMessages') {
       try {
         const result = await this.executeDirectCommand(tab_id, action, message);
         sendResult({ success: true, data: result });
@@ -575,7 +577,7 @@ class GAPIWebSocketClient {
         try {
           await chrome.scripting.executeScript({
             target: { tabId: tab_id },
-            files: ['content-site-registry.js', 'content-site-gemini.js', 'content-site-claude.js', 'content.js']
+            files: ['content-site-registry.js', 'content-site-gemini.js', 'content-site-claude.js', 'content-site-nebula.js', 'content.js']
           });
           await new Promise(r => setTimeout(r, 1500));
           const response = await trySend(tab_id, buildMsg());
@@ -597,28 +599,106 @@ class GAPIWebSocketClient {
       const results = await chrome.scripting.executeScript({
         target: { tabId },
         func: () => {
-          // Try multiple selectors to find AI response elements
+          const host = location.hostname;
+
+          // --- Nebula: site-specific extraction ---
+          if (host.includes('nebula.gg')) {
+            const blocks = document.querySelectorAll('.user-message-block');
+            if (blocks.length === 0) return { status: 'failed', reason: 'No messages found on Nebula' };
+            const lastBlock = blocks[blocks.length - 1];
+            // The reply div is the 2nd child of .user-message-block.
+            // Its classes are: ml-1.5 border-l-2 pl-2 transition-colors duration-300 border-border/20
+            const reply = lastBlock.children[1];
+            if (!reply) return { status: 'failed', reason: 'No AI reply in last message block' };
+
+            // Use innerText split on newlines for positional stripping.
+            // Line structure emitted by Nebula:
+            //   [0] Agent name     — e.g. "Nebula", "GPT-4" (no digits/punct, short)
+            //   [1] Timestamp      — e.g. "上午11:19", "下午3:45", "AM 9:00"
+            //   [2..N] AI content  — one or more lines of actual response
+            //   [N+1] (optional)   — response time e.g. "1.4s"
+            //   [N+2] (optional)   — token count   e.g. "940 tokens"
+            //   [N+3] (optional)   — reaction count e.g. "1" (bare integer)
+            const RE_TIMESTAMP   = /^(上午|下午|AM|PM)\s*\d{1,2}:\d{2}$/;
+            const RE_AGENT_NAME  = /^[^\d\W]{1,40}$/u;
+            const RE_RESP_TIME   = /^\d+(\.\d+)?s$/;
+            const RE_TOKEN_COUNT = /^\d+\s*tokens?$/i;
+            const RE_REACTION    = /^\d+$/;
+
+            const rawLines = reply.innerText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+            let start = 0;
+            // Strip leading agent name line
+            if (rawLines.length > 0 && RE_AGENT_NAME.test(rawLines[0])) {
+              start = 1;
+            }
+            // Strip timestamp line immediately after the agent name
+            if (rawLines.length > start && RE_TIMESTAMP.test(rawLines[start])) {
+              start += 1;
+            }
+
+            let end = rawLines.length;
+            // Strip trailing reaction count (bare integer)
+            if (end > start && RE_REACTION.test(rawLines[end - 1])) {
+              end -= 1;
+            }
+            // Strip trailing token count
+            if (end > start && RE_TOKEN_COUNT.test(rawLines[end - 1])) {
+              end -= 1;
+            }
+            // Strip trailing response time
+            if (end > start && RE_RESP_TIME.test(rawLines[end - 1])) {
+              end -= 1;
+            }
+
+            const text = rawLines.slice(start, end).join('\n').trim();
+            return text ? { status: 'success', data: text } : { status: 'failed', reason: 'Empty AI reply after metadata strip' };
+          }
+
+          // --- Claude: site-specific selectors ---
+          if (host.includes('claude.ai')) {
+            const selectors = [
+              '[class*="response"]',
+              '.font-claude-message',
+              '[data-testid="ai-turn"]',
+              '[data-role="assistant"]',
+              '[data-message-author-role="assistant"]'
+            ];
+            let elements = [];
+            for (const sel of selectors) {
+              elements = document.querySelectorAll(sel);
+              if (elements.length > 0) break;
+            }
+            if (elements.length === 0) return { status: 'failed', reason: 'No AI response found on Claude' };
+            const last = elements[elements.length - 1];
+            const clone = last.cloneNode(true);
+            clone.querySelectorAll('button, [role="button"], [aria-label], .thinking-toggle').forEach(n => n.remove());
+            const text = clone.innerText.replace(/\s+/g, ' ').trim();
+            return text ? { status: 'success', data: text } : { status: 'failed', reason: 'Empty AI response' };
+          }
+
+          // --- Gemini (default): site-specific selectors ---
           const selectors = [
-            'message-content',
-            '.message-content',
-            '[class*="model-response"]',
-            '[data-role="model"]',
+            'message-content', '.message-content',
+            '[class*="model-response"]', '[data-role="model"]',
             '[data-message-role="model"]',
-            '[class*="assistant"]'
+            // Generic fallbacks
+            '[data-role="assistant"]',
+            '[data-message-author-role="assistant"]',
+            '[class*="assistant"]',
+            '[class*="response"]'
           ];
           let elements = [];
           for (const sel of selectors) {
             elements = document.querySelectorAll(sel);
             if (elements.length > 0) break;
           }
-          if (elements.length === 0) {
-            return { status: 'failed', reason: 'No AI response found' };
-          }
+          if (elements.length === 0) return { status: 'failed', reason: 'No AI response found' };
           const last = elements[elements.length - 1];
           const clone = last.cloneNode(true);
           clone.querySelectorAll('button, [role="button"], [aria-label], .thinking-toggle').forEach(n => n.remove());
           const text = clone.innerText.replace(/\s+/g, ' ').trim();
-          return { status: 'success', data: text };
+          return text ? { status: 'success', data: text } : { status: 'failed', reason: 'Empty AI response' };
         }
       });
       return results[0]?.result || { status: 'failed', reason: 'Script execution returned no result' };
@@ -678,6 +758,142 @@ class GAPIWebSocketClient {
         args: [message]
       });
       return results[0]?.result || { status: 'failed', reason: 'Script execution returned no result' };
+    }
+
+    if (action === 'inspectMessages') {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          // Find all message-like elements and show their structure
+          const blocks = document.querySelectorAll('[class*="message-block"], [class*="message"]');
+          const msgs = [];
+          blocks.forEach((b, i) => {
+            if (i > 10) return;
+            msgs.push({
+              index: i,
+              tag: b.tagName,
+              classes: b.className?.substring(0, 200) || '',
+              childCount: b.children.length,
+              text: b.innerText?.substring(0, 300) || '',
+              attrs: Array.from(b.attributes).map(a => `${a.name}=${a.value.substring(0, 50)}`).slice(0, 10),
+              children: Array.from(b.children).slice(0, 5).map(c => ({
+                tag: c.tagName,
+                classes: c.className?.substring(0, 100) || '',
+                text: c.innerText?.substring(0, 100) || ''
+              }))
+            });
+          });
+          return { messageBlocks: msgs, total: blocks.length, url: location.href };
+        }
+      });
+      return results[0]?.result || { status: 'failed', reason: 'No result' };
+    }
+
+    if (action === 'inspectDOM') {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          // Response selectors
+          const respSels = [
+            'message-content', '.message-content',
+            '[class*="model-response"]', '[data-role="model"]',
+            '.font-claude-message', '[data-testid="ai-turn"]',
+            '[data-testid="user-message"]',
+            '[data-role="assistant"]', '[class*="assistant"]',
+            '[class*="response"]', '[class*="message"]'
+          ];
+          const found = {};
+          for (const sel of respSels) {
+            try {
+              const els = document.querySelectorAll(sel);
+              if (els.length > 0) {
+                const last = els[els.length - 1];
+                found[sel] = {
+                  count: els.length,
+                  tag: last.tagName,
+                  classes: last.className?.substring?.(0, 150) || '',
+                  sample: last.innerText?.substring(0, 200) || ''
+                };
+              }
+            } catch(e) {}
+          }
+          // Input fields
+          const inputSels = [
+            'div.ProseMirror[contenteditable="true"]',
+            'div[contenteditable="true"][data-placeholder]',
+            'div[contenteditable="true"][role="textbox"]',
+            'div[contenteditable="true"]',
+            '[data-testid="chat-input"]',
+            'textarea'
+          ];
+          const inputs = {};
+          for (const sel of inputSels) {
+            try {
+              const el = document.querySelector(sel);
+              if (el) {
+                inputs[sel] = {
+                  tag: el.tagName,
+                  placeholder: el.getAttribute('placeholder') || el.getAttribute('aria-label') || el.getAttribute('data-placeholder') || '',
+                  classes: el.className?.substring?.(0, 150) || ''
+                };
+              }
+            } catch(e) {}
+          }
+          // Send buttons
+          const btnSels = [
+            'button[data-testid="send-button"]',
+            'button[aria-label*="Send"]',
+            'button[aria-label*="send"]',
+            'button[type="submit"]'
+          ];
+          const buttons = {};
+          for (const sel of btnSels) {
+            try {
+              const el = document.querySelector(sel);
+              if (el) {
+                buttons[sel] = {
+                  text: el.innerText?.substring(0, 50) || '',
+                  ariaLabel: el.getAttribute('aria-label') || '',
+                  disabled: el.disabled
+                };
+              }
+            } catch(e) {}
+          }
+          // data-testid values
+          const testIds = new Set();
+          document.querySelectorAll('[data-testid]').forEach(el => testIds.add(el.getAttribute('data-testid')));
+          return { found, inputs, buttons, testIds: [...testIds].slice(0, 50), url: location.href, title: document.title };
+        }
+      });
+      return results[0]?.result || { status: 'failed', reason: 'No result' };
+    }
+
+    if (action === 'inspectReply') {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const blocks = document.querySelectorAll('.user-message-block');
+          if (blocks.length === 0) return { error: 'No message blocks' };
+          const lastBlock = blocks[blocks.length - 1];
+          const reply = lastBlock.children[1];
+          if (!reply) return { error: 'No reply child' };
+          // Map direct children
+          const children = [];
+          for (let i = 0; i < reply.children.length; i++) {
+            const c = reply.children[i];
+            children.push({
+              index: i,
+              tag: c.tagName,
+              classes: (c.className || '').substring(0, 200),
+              text: (c.innerText || '').substring(0, 300),
+              childCount: c.children.length,
+              attrs: Array.from(c.attributes || []).map(a => `${a.name}=${a.value}`).slice(0, 5)
+            });
+          }
+          return { childCount: reply.children.length, children, outerHTML: reply.outerHTML.substring(0, 2000) };
+        }
+      });
+      return results[0]?.result || { status: 'failed' };
     }
 
     throw new Error(`Unsupported direct action: ${action}`);
@@ -3856,6 +4072,9 @@ function parseChatIdFromUrl(url) {
     // Gemini: /app/{chatId}
     const gemini = url.match(/\/app\/([^/?#]+)/);
     if (gemini && gemini[1]) return gemini[1];
+    // Nebula: /chat/channel/{threadId} (must check before Claude)
+    const nebula = url.match(/\/chat\/channel\/([^/?#]+)/);
+    if (nebula && nebula[1]) return nebula[1];
     // Claude: /chat/{uuid}
     const claude = url.match(/\/chat\/([^/?#]+)/);
     if (claude && claude[1]) return claude[1];
@@ -3888,7 +4107,19 @@ async function pingGeminiTab(tabId) {
 }
 
 async function collectActivePages() {
-  const tabs = await findAllSupportedTabs();
+  let tabs = await findAllSupportedTabs();
+  // Fallback: also scan all tabs by hostname in case URL pattern matching missed some
+  try {
+    const allTabs = await chrome.tabs.query({});
+    const knownIds = new Set(tabs.map(t => t.id));
+    for (const t of allTabs) {
+      if (knownIds.has(t.id)) continue;
+      const site = getSiteFromUrl(t.url);
+      if (site) {
+        tabs.push({ ...t, site });
+      }
+    }
+  } catch { /* ignore */ }
   const pages = [];
   for (const t of tabs || []) {
     const url = t.url || '';

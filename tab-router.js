@@ -14,6 +14,12 @@ const SUPPORTED_SITES = {
     label: 'Claude',
     urlPatterns: ['https://claude.ai/*'],
     hostIncludes: 'claude.ai'
+  },
+  nebula: {
+    name: 'nebula',
+    label: 'Nebula',
+    urlPatterns: ['https://www.nebula.gg/*'],
+    hostIncludes: 'nebula.gg'
   }
 };
 
