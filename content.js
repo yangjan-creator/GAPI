@@ -1020,6 +1020,18 @@
         }
 
         if (message.action === 'ACTION_SEND_MESSAGE') {
+            // If the adapter provides a custom sendMessage, delegate to it.
+            // This handles ProseMirror-based editors (Claude) that reject
+            // execCommand-based text injection.
+            if (adapter && typeof adapter.sendMessage === 'function') {
+                adapter.sendMessage(message.text).then(result => {
+                    sendResponse({ status: result.success ? 'sent' : 'failed', ...result, site: window.location.hostname });
+                }).catch(err => {
+                    sendResponse({ status: 'failed', reason: err.message, site: window.location.hostname });
+                });
+                return true;
+            }
+
             const inputSels = (adapter && adapter.inputSelectors) || ['div[contenteditable="true"]'];
             const sendSels = (adapter && adapter.sendButtonSelectors) || ['button[aria-label*="Send"]'];
             let inputField = null;
@@ -1034,7 +1046,18 @@
             }
             if (inputField) {
                 inputField.focus();
-                document.execCommand('insertText', false, message.text);
+                // Detect ProseMirror and use clipboard paste instead of execCommand
+                const isPM = inputField.classList.contains('ProseMirror') ||
+                  inputField.closest('.ProseMirror') !== null;
+                if (isPM) {
+                    const dt = new DataTransfer();
+                    dt.setData('text/plain', message.text);
+                    inputField.dispatchEvent(new ClipboardEvent('paste', {
+                        bubbles: true, cancelable: true, clipboardData: dt
+                    }));
+                } else {
+                    document.execCommand('insertText', false, message.text);
+                }
                 setTimeout(() => {
                     if (sendBtn) {
                         sendBtn.click();
@@ -7001,6 +7024,25 @@
       _log.debug('[Gemini 分類助手] [發送消息] 消息內容:', messageText.substring(0, 100) + (messageText.length > 100 ? '...' : ''));
       _log.debug('[Gemini 分類助手] [發送消息] 消息長度:', messageText.length, '字符');
 
+      // === Adapter-level sendMessage override ===
+      // If the current site adapter provides its own sendMessage method,
+      // delegate to it. This is critical for sites like Claude that use
+      // ProseMirror editors where standard DOM text injection does not work.
+      const __adapterRegistry = window.__GAPI_SiteRegistry;
+      const __siteAdapter = __adapterRegistry ? __adapterRegistry.getCurrentAdapter() : null;
+      if (__siteAdapter && typeof __siteAdapter.sendMessage === 'function') {
+        _log.debug('[Gemini 分類助手] [發送消息] Adapter provides custom sendMessage — delegating to', __siteAdapter.name || 'unknown');
+        try {
+          const adapterResult = await __siteAdapter.sendMessage(messageText);
+          _log.debug('[Gemini 分類助手] [發送消息] Adapter sendMessage result:', adapterResult);
+          return adapterResult;
+        } catch (adapterErr) {
+          _log.error('[Gemini 分類助手] [發送消息] Adapter sendMessage failed:', adapterErr.message);
+          _log.debug('[Gemini 分類助手] [發送消息] Falling through to generic send path...');
+          // Fall through to the generic implementation below
+        }
+      }
+
       // 步驟 1: 查找輸入框（帶重試機制）
       const inputElement = await findInputElement(3, 500);
       
@@ -7052,6 +7094,104 @@
 
       // Determine if input is a native form element (textarea/input) vs contenteditable
       const isNativeInput = inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT';
+
+      // Detect ProseMirror editors: these use their own internal state model
+      // and ignore DOM-level changes from execCommand/textContent. For these
+      // editors, we must use clipboard paste simulation to inject text.
+      const isProseMirror = !isNativeInput && (
+        inputElement.classList.contains('ProseMirror') ||
+        inputElement.closest('.ProseMirror') !== null ||
+        inputElement.querySelector('.ProseMirror') !== null
+      );
+
+      if (isProseMirror) {
+        _log.debug('[Gemini 分類助手] [發送消息] Detected ProseMirror editor — using clipboard paste simulation');
+        // For ProseMirror: skip character-by-character typing simulation.
+        // Use paste simulation to inject the full text at once.
+        try {
+          inputElement.focus();
+          // Select all existing content and delete it
+          inputElement.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'a', code: 'KeyA', keyCode: 65,
+            ctrlKey: true, bubbles: true, cancelable: true
+          }));
+          await new Promise(r => setTimeout(r, 50));
+          inputElement.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Backspace', code: 'Backspace', keyCode: 8,
+            bubbles: true, cancelable: true
+          }));
+          await new Promise(r => setTimeout(r, 100));
+
+          // Paste text via ClipboardEvent
+          const clipboardData = new DataTransfer();
+          clipboardData.setData('text/plain', messageText);
+          const pasteEvent = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: clipboardData
+          });
+          inputElement.dispatchEvent(pasteEvent);
+          await new Promise(r => setTimeout(r, 300));
+
+          // Verify paste worked
+          const pastedText = (inputElement.textContent || inputElement.innerText || '').trim();
+          if (pastedText.length === 0 || !pastedText.includes(messageText.trim().substring(0, 20))) {
+            _log.warn('[Gemini 分類助手] [發送消息] ProseMirror paste may have failed, trying execCommand fallback');
+            document.execCommand('selectAll', false, null);
+            document.execCommand('delete', false, null);
+            document.execCommand('insertText', false, messageText);
+            await new Promise(r => setTimeout(r, 200));
+          }
+          _log.debug('[Gemini 分類助手] [發送消息] ProseMirror text insertion complete');
+        } catch (pmErr) {
+          _log.error('[Gemini 分類助手] [發送消息] ProseMirror paste failed:', pmErr.message);
+          // Last resort: try execCommand
+          try {
+            inputElement.focus();
+            document.execCommand('insertText', false, messageText);
+          } catch (e2) {
+            _log.error('[Gemini 分類助手] [發送消息] All ProseMirror insertion methods failed');
+          }
+        }
+
+        // Skip to send button / Enter handling (below the typing loop)
+        // Jump past the typing simulation block by going to step 5
+        await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 700));
+
+        // Find and click send button (same logic as step 5 below)
+        _log.debug('[Gemini 分類助手] [發送消息] [ProseMirror] Looking for send button...');
+        const pmSendButton = findSendButton(inputElement);
+        if (pmSendButton) {
+          if (pmSendButton.disabled) {
+            _log.debug('[Gemini 分類助手] [發送消息] [ProseMirror] Send button disabled, waiting...');
+            await new Promise(r => setTimeout(r, 500));
+          }
+          try {
+            pmSendButton.click();
+            _log.debug('[Gemini 分類助手] [發送消息] [ProseMirror] ========== 消息發送完成（方法：ProseMirror paste + button）==========');
+            return { success: true, method: 'prosemirror_paste_button' };
+          } catch (btnErr) {
+            _log.warn('[Gemini 分類助手] [發送消息] [ProseMirror] Button click failed:', btnErr.message);
+          }
+        }
+
+        // Fallback: press Enter
+        inputElement.focus();
+        inputElement.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+          bubbles: true, cancelable: true
+        }));
+        await new Promise(r => setTimeout(r, 500));
+
+        const pmPostText = (inputElement.textContent || inputElement.innerText || '').trim();
+        if (pmPostText.length === 0 || pmPostText !== messageText.trim()) {
+          _log.debug('[Gemini 分類助手] [發送消息] [ProseMirror] ========== 消息發送完成（方法：ProseMirror paste + enter）==========');
+          return { success: true, method: 'prosemirror_paste_enter' };
+        }
+
+        _log.error('[Gemini 分類助手] [發送消息] [ProseMirror] Message may not have been sent');
+        return { success: false, reason: 'ProseMirror: input not cleared after submit' };
+      }
 
       // Helper: insert a single character into the input element.
       // For contenteditable elements, uses document.execCommand.

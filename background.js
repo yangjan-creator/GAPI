@@ -728,9 +728,39 @@ class GAPIWebSocketClient {
               input.value = text;
               input.dispatchEvent(new Event('input', { bubbles: true }));
             } else {
-              // contenteditable — use textContent + InputEvent to trigger framework state update
-              input.textContent = text;
-              input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+              // contenteditable — detect ProseMirror and use clipboard paste simulation.
+              // ProseMirror maintains its own internal document model and ignores
+              // direct DOM changes (textContent, execCommand). Paste events are the
+              // reliable way to feed text through ProseMirror's input pipeline.
+              const isPM = input.classList.contains('ProseMirror') ||
+                input.closest('.ProseMirror') !== null;
+
+              if (isPM) {
+                // ProseMirror: clear via select-all + delete, then paste
+                input.dispatchEvent(new KeyboardEvent('keydown', {
+                  key: 'a', code: 'KeyA', keyCode: 65,
+                  ctrlKey: true, bubbles: true, cancelable: true
+                }));
+                setTimeout(() => {
+                  input.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Backspace', code: 'Backspace', keyCode: 8,
+                    bubbles: true, cancelable: true
+                  }));
+                  setTimeout(() => {
+                    const dt = new DataTransfer();
+                    dt.setData('text/plain', text);
+                    input.dispatchEvent(new ClipboardEvent('paste', {
+                      bubbles: true, cancelable: true, clipboardData: dt
+                    }));
+                  }, 50);
+                }, 50);
+              } else {
+                // Non-ProseMirror contenteditable: use textContent + InputEvent
+                input.textContent = text;
+                input.dispatchEvent(new InputEvent('input', {
+                  bubbles: true, inputType: 'insertText', data: text
+                }));
+              }
             }
 
             // Wait for send button to become enabled, then click

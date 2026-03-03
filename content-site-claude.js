@@ -244,6 +244,243 @@
       'Previous 30 days'
     ],
 
+    // ========== ProseMirror 訊息發送 ==========
+    // Claude uses a ProseMirror-based rich text editor. Standard DOM
+    // manipulation (execCommand, textContent, InputEvent) does NOT work
+    // because ProseMirror maintains its own internal document model and
+    // ignores external DOM changes. The reliable approach is to simulate
+    // a clipboard paste event, which ProseMirror processes through its
+    // own input handling pipeline (handlePaste).
+
+    /**
+     * Send a message to Claude's ProseMirror editor.
+     * This is the adapter-level override called by content.js when it
+     * detects that the current adapter provides a sendMessage method.
+     *
+     * @param {string} text - The message text to send.
+     * @returns {Promise<{success: boolean, method?: string, reason?: string}>}
+     */
+    async sendMessage(text) {
+      const log = (level, ...args) => {
+        const prefix = '[ClaudeAdapter] [sendMessage]';
+        if (level === 'error') console.error(prefix, ...args);
+        else if (level === 'warn') console.warn(prefix, ...args);
+        else console.log(prefix, ...args);
+      };
+
+      log('info', '========== Begin send message ==========');
+      log('info', 'Text length:', text.length, '| Preview:', text.substring(0, 80));
+
+      // --- Step 1: Find the ProseMirror editor element ---
+      let editor = null;
+      for (const sel of this.inputSelectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            editor = el;
+            log('info', 'Found editor via selector:', sel);
+            break;
+          }
+        }
+      }
+
+      if (!editor) {
+        log('error', 'ProseMirror editor element not found');
+        return { success: false, reason: 'ProseMirror editor not found' };
+      }
+
+      // --- Step 2: Focus the editor ---
+      editor.focus();
+      // Click to ensure the cursor is placed inside the editor
+      editor.click();
+      await new Promise(r => setTimeout(r, 150));
+
+      // --- Step 3: Clear any existing content ---
+      // Select all existing content so the paste replaces it
+      const existingText = (editor.textContent || '').trim();
+      if (existingText.length > 0) {
+        log('info', 'Clearing existing content:', existingText.substring(0, 50));
+        // Use Ctrl+A to select all, then delete
+        editor.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'a', code: 'KeyA', keyCode: 65,
+          ctrlKey: true, metaKey: false,
+          bubbles: true, cancelable: true
+        }));
+        await new Promise(r => setTimeout(r, 50));
+        editor.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Backspace', code: 'Backspace', keyCode: 8,
+          bubbles: true, cancelable: true
+        }));
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      // --- Step 4: Insert text via clipboard paste simulation ---
+      // This is the key technique: ProseMirror listens for paste events
+      // and processes them through its handlePaste pipeline. By creating
+      // a ClipboardEvent with a DataTransfer containing our text, we
+      // feed ProseMirror through its standard input path.
+      log('info', 'Inserting text via clipboard paste simulation...');
+
+      let pasteSucceeded = false;
+
+      try {
+        const clipboardData = new DataTransfer();
+        clipboardData.setData('text/plain', text);
+        const pasteEvent = new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: clipboardData
+        });
+        editor.dispatchEvent(pasteEvent);
+
+        // Wait for ProseMirror to process the paste event
+        await new Promise(r => setTimeout(r, 300));
+
+        // Verify the text was inserted
+        const editorText = (editor.textContent || editor.innerText || '').trim();
+        const expectedTrimmed = text.trim();
+
+        if (editorText.length > 0 && editorText.includes(expectedTrimmed.substring(0, 20))) {
+          log('info', 'Paste simulation succeeded. Editor text length:', editorText.length);
+          pasteSucceeded = true;
+        } else {
+          log('warn', 'Paste simulation may have failed. Editor text:', editorText.substring(0, 100));
+        }
+      } catch (pasteErr) {
+        log('warn', 'Paste simulation threw error:', pasteErr.message);
+      }
+
+      // --- Step 4b: Fallback — try InputEvent with insertFromPaste ---
+      // Some ProseMirror builds also respond to beforeinput/input events
+      // with inputType "insertFromPaste".
+      if (!pasteSucceeded) {
+        log('info', 'Trying fallback: InputEvent insertFromPaste...');
+        try {
+          editor.focus();
+          const beforeInput = new InputEvent('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertFromPaste',
+            data: text,
+            dataTransfer: (() => {
+              const dt = new DataTransfer();
+              dt.setData('text/plain', text);
+              return dt;
+            })()
+          });
+          editor.dispatchEvent(beforeInput);
+
+          await new Promise(r => setTimeout(r, 200));
+
+          const editorText2 = (editor.textContent || editor.innerText || '').trim();
+          if (editorText2.length > 0 && editorText2.includes(text.trim().substring(0, 20))) {
+            log('info', 'insertFromPaste fallback succeeded.');
+            pasteSucceeded = true;
+          }
+        } catch (fallbackErr) {
+          log('warn', 'insertFromPaste fallback error:', fallbackErr.message);
+        }
+      }
+
+      // --- Step 4c: Fallback — try execCommand insertText ---
+      // Last resort for editors that may accept execCommand
+      if (!pasteSucceeded) {
+        log('info', 'Trying last resort: execCommand insertText...');
+        try {
+          editor.focus();
+          document.execCommand('selectAll', false, null);
+          document.execCommand('delete', false, null);
+          document.execCommand('insertText', false, text);
+          await new Promise(r => setTimeout(r, 200));
+
+          const editorText3 = (editor.textContent || editor.innerText || '').trim();
+          if (editorText3.length > 0 && editorText3.includes(text.trim().substring(0, 20))) {
+            log('info', 'execCommand fallback succeeded.');
+            pasteSucceeded = true;
+          }
+        } catch (execErr) {
+          log('warn', 'execCommand fallback error:', execErr.message);
+        }
+      }
+
+      if (!pasteSucceeded) {
+        log('error', 'All text insertion methods failed');
+        return { success: false, reason: 'Failed to insert text into ProseMirror editor' };
+      }
+
+      // --- Step 5: Wait briefly, then find and click the send button ---
+      // Simulate a brief pause (as if the user reviews before sending)
+      await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+
+      log('info', 'Looking for send button...');
+      let sendBtn = null;
+      for (const sel of this.sendButtonSelectors) {
+        const btn = document.querySelector(sel);
+        if (btn) {
+          const rect = btn.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            sendBtn = btn;
+            log('info', 'Found send button via selector:', sel);
+            break;
+          }
+        }
+      }
+
+      if (sendBtn) {
+        // Wait for the button to become enabled (ProseMirror state update
+        // may take a tick to propagate to React, which enables the button)
+        let waitAttempts = 0;
+        while (sendBtn.disabled && waitAttempts < 15) {
+          await new Promise(r => setTimeout(r, 200));
+          waitAttempts++;
+          log('info', 'Waiting for send button to enable... attempt', waitAttempts);
+        }
+
+        if (sendBtn.disabled) {
+          log('warn', 'Send button still disabled after waiting. Attempting click anyway.');
+        }
+
+        sendBtn.click();
+        log('info', 'Clicked send button');
+
+        // Verify: wait and check if editor was cleared (indicating submission)
+        await new Promise(r => setTimeout(r, 500));
+        const postSendText = (editor.textContent || editor.innerText || '').trim();
+        if (postSendText.length === 0 || postSendText !== text.trim()) {
+          log('info', '========== Message sent successfully (button) ==========');
+          return { success: true, method: 'claude_paste_button' };
+        } else {
+          log('warn', 'Editor not cleared after button click. Text still present.');
+        }
+      } else {
+        log('warn', 'Send button not found, trying Enter key...');
+      }
+
+      // --- Step 6: Fallback — press Enter to send ---
+      editor.focus();
+      const enterEvent = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true
+      });
+      editor.dispatchEvent(enterEvent);
+
+      await new Promise(r => setTimeout(r, 500));
+
+      const postEnterText = (editor.textContent || editor.innerText || '').trim();
+      if (postEnterText.length === 0 || postEnterText !== text.trim()) {
+        log('info', '========== Message sent successfully (enter) ==========');
+        return { success: true, method: 'claude_paste_enter' };
+      }
+
+      log('error', 'Message may not have been sent — editor not cleared after submit');
+      return { success: false, reason: 'Input not cleared after submit — message may not have been sent' };
+    },
+
     // ========== 圖片提取 ==========
     // Claude (as of 2025) does not support AI-generated image output in the
     // same way as Gemini (no DALL-E equivalent). Set to null to skip.
