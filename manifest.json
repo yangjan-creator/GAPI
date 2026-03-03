@@ -20,8 +20,17 @@
     "http://*/*",
     "ws://*/*"
   ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
-    "default_title": "開啟 Gemini 分類助手"
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "GAPI — AI Chat Bridge"
   },
   "side_panel": {
     "default_path": "sidepanel.html"

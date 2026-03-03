@@ -1235,7 +1235,28 @@ class ReloadRequest(BaseModel):
 
 @app.post("/v1/extension/reload")
 async def reload_extension(data: ReloadRequest = ReloadRequest(), auth=Depends(verify_auth)):
-    """Reload extension. mode=soft: reinject content scripts. mode=hard: restart Chrome."""
+    """Reload extension. mode=soft|full|hard."""
+    if data.mode == "full":
+        # Full reload: chrome.runtime.reload() via WebSocket
+        sent = 0
+        for client_id, ws in list(manager.active_connections.items()):
+            try:
+                await ws.send_text(json.dumps({
+                    "type": "reload_extension",
+                    "payload": {"mode": "full"}
+                }))
+                sent += 1
+            except Exception:
+                pass
+        if sent == 0:
+            raise HTTPException(status_code=404, detail="No extensions connected")
+        return {
+            "status": "ok",
+            "mode": "full",
+            "message": f"Full reload sent to {sent} extension(s)",
+            "note": "Extension will restart and reconnect automatically"
+        }
+
     if data.mode == "hard":
         import subprocess, shutil
         urls = data.urls or ["https://gemini.google.com"]
@@ -1268,7 +1289,10 @@ async def reload_extension(data: ReloadRequest = ReloadRequest(), auth=Depends(v
     sent = 0
     for client_id, ws in list(manager.active_connections.items()):
         try:
-            await ws.send_text(json.dumps({"type": "reload_extension"}))
+            await ws.send_text(json.dumps({
+                "type": "reload_extension",
+                "payload": {"mode": "soft"}
+            }))
             sent += 1
         except Exception:
             pass

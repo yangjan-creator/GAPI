@@ -325,17 +325,25 @@ class GAPIWebSocketClient {
         return;
       }
 
-      // 遠端更新 content scripts（安全模式，不重啟 Extension）
+      // 遠端更新 — soft: reinject content scripts / full: chrome.runtime.reload()
       if (msg.type === 'reload_extension') {
-        console.log('[GAPI-WS] Remote update requested');
-        (async () => {
-          try {
-            const count = await reinjectContentScripts();
-            this.send({ type: 'reload_ack', payload: { status: 'updated', tabs_updated: count } });
-          } catch (err) {
-            this.send({ type: 'reload_ack', payload: { status: 'error', error: err.message } });
-          }
-        })();
+        const mode = msg.payload?.mode || 'soft';
+        console.log(`[GAPI-WS] Remote reload requested (mode=${mode})`);
+        if (mode === 'full') {
+          // Full reload: restart entire extension (background.js + content scripts)
+          this.send({ type: 'reload_ack', payload: { status: 'reloading' } });
+          setTimeout(() => chrome.runtime.reload(), 500);
+        } else {
+          // Soft reload: only reinject content scripts
+          (async () => {
+            try {
+              const count = await reinjectContentScripts();
+              this.send({ type: 'reload_ack', payload: { status: 'updated', tabs_updated: count } });
+            } catch (err) {
+              this.send({ type: 'reload_ack', payload: { status: 'error', error: err.message } });
+            }
+          })();
+        }
         return;
       }
 
@@ -751,11 +759,18 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 
   if (alarm.name === ALARM_RECONNECT) {
-    if (!gapiClient.authenticated && gapiClient.extensionId) {
+    if (!gapiClient.authenticated) {
       console.log('[GAPI-Alarm] Reconnect alarm triggered');
-      gapiClient.connect(gapiClient.extensionId, { forceNewToken: true }).catch(err => {
-        console.error('[GAPI-Alarm] Reconnect failed:', err);
-      });
+      if (gapiClient.extensionId) {
+        gapiClient.connect(gapiClient.extensionId, { forceNewToken: true }).catch(err => {
+          console.error('[GAPI-Alarm] Reconnect failed:', err);
+        });
+      } else {
+        // extensionId not loaded yet — run full bootstrap
+        bootstrapGAPI().catch(err => {
+          console.error('[GAPI-Alarm] Bootstrap failed:', err);
+        });
+      }
     }
     return;
   }
@@ -1411,23 +1426,31 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 // 遠端 API 會話管理
 const remoteSessions = new Map(); // sessionId -> { messages: [], images: [], createdAt }
 
+// ========== 啟動連線（統一入口） ==========
+async function bootstrapGAPI() {
+  try {
+    await initGAPIHttpConnection();
+    await initGAPIConnection();
+    console.log('[GAPI] Bootstrap complete');
+  } catch (err) {
+    console.error('[GAPI] Bootstrap failed, scheduling retry:', err);
+    // 確保 alarm 存在以喚醒 service worker 重試
+    chrome.alarms.create(ALARM_RECONNECT, { delayInMinutes: 0.5 });
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   console.log('Gemini 對話分類助手已安裝');
-  
-  // [強制行為] 讓插件點擊時直接開啟側邊欄
+
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
     .catch((error) => console.error(error));
-  
-  // 設置 Side Panel 為在 Gemini 網頁上自動啟用
+
   await chrome.sidePanel.setOptions({
     path: 'sidepanel.html',
     enabled: true
   });
-  
-  // [P1.3] 初始化 GAPI HTTP 客戶端
-  await initGAPIHttpConnection();
-  
-  // 初始化專案存儲（如果不存在）
+
+  // 初始化專案存儲
   chrome.storage.local.get(['interceptedImages', 'projects'], (result) => {
     if (!result.interceptedImages) {
       chrome.storage.local.set({ interceptedImages: [] });
@@ -1441,6 +1464,14 @@ chrome.runtime.onInstalled.addListener(async () => {
       });
     }
   });
+
+  await bootstrapGAPI();
+});
+
+// Service worker 被喚醒時（Chrome 啟動、alarm 觸發等）也嘗試連線
+chrome.runtime.onStartup.addListener(async () => {
+  console.log('[GAPI] onStartup — bootstrapping');
+  await bootstrapGAPI();
 });
 
 // ========== 遠端更新：重新注入 Content Scripts ==========
