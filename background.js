@@ -320,6 +320,38 @@ class GAPIWebSocketClient {
         return;
       }
 
+      // 遠端更新 content scripts（安全模式，不重啟 Extension）
+      if (msg.type === 'reload_extension') {
+        console.log('[GAPI-WS] Remote update requested');
+        (async () => {
+          try {
+            const count = await reinjectContentScripts();
+            this.send({ type: 'reload_ack', payload: { status: 'updated', tabs_updated: count } });
+          } catch (err) {
+            this.send({ type: 'reload_ack', payload: { status: 'error', error: err.message } });
+          }
+        })();
+        return;
+      }
+
+      // 處理 server 下發的分頁指令
+      if (msg.type === 'tab_command') {
+        console.log('[GAPI-WS] Tab command received:', JSON.stringify(msg.payload));
+        const self = this;
+        (async () => {
+          try {
+            await self.handleTabCommand(msg.payload);
+          } catch (err) {
+            console.error('[GAPI-WS] handleTabCommand uncaught:', err);
+            self.send({
+              type: 'tab_command_result',
+              payload: { command_id: msg.payload.command_id, success: false, error: String(err) }
+            });
+          }
+        })();
+        return;
+      }
+
     } catch (error) {
       console.error('[GAPI-WS] Message parse error:', error);
     }
@@ -441,6 +473,182 @@ class GAPIWebSocketClient {
   }
 
   // 同步活躍頁面到 GAPI Server
+  // 處理 server 下發的分頁指令（sendMessage / GET_LAST_RESPONSE）
+  async handleTabCommand(payload) {
+    const { command_id, tab_id, action, message } = payload;
+    console.log(`[GAPI-WS] Tab command: ${action} → tab ${tab_id} (${command_id})`);
+
+    const sendResult = (result) => {
+      this.send({
+        type: 'tab_command_result',
+        payload: { command_id, ...result }
+      });
+    };
+
+    const buildMsg = () => {
+      if (action === 'sendMessage' || action === 'SEND_MESSAGE') {
+        return { action: 'sendMessage', messageText: message };
+      }
+      return { action };
+    };
+
+    const trySend = (tabId, msg) => new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tabId, msg, (resp) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(resp);
+      });
+    });
+
+    // createTab: open a new browser tab
+    if (action === 'createTab') {
+      try {
+        const url = message || 'https://gemini.google.com/app';
+        const tab = await chrome.tabs.create({ url });
+        console.log(`[GAPI-WS] Created tab ${tab.id} → ${url}`);
+        sendResult({ success: true, data: { tab_id: tab.id, url } });
+      } catch (err) {
+        console.error('[GAPI-WS] createTab failed:', err);
+        sendResult({ success: false, error: err.message });
+      }
+      return;
+    }
+
+    // GET_LAST_RESPONSE: always use direct execution (chrome.scripting)
+    // SEND_MESSAGE: use content script handler (more reliable for framework state)
+    if (action === 'GET_LAST_RESPONSE') {
+      try {
+        const result = await this.executeDirectCommand(tab_id, action, message);
+        sendResult({ success: true, data: result });
+      } catch (directErr) {
+        console.error('[GAPI-WS] Direct GET_LAST_RESPONSE failed:', directErr);
+        sendResult({ success: false, error: directErr.message });
+      }
+      return;
+    }
+
+    // For send: use content script, auto-inject if stale
+    try {
+      const response = await trySend(tab_id, buildMsg());
+      sendResult({ success: true, data: response });
+    } catch (err) {
+      const needsInject = err.message.includes('Receiving end does not exist')
+        || err.message.includes('message port closed');
+      if (needsInject) {
+        console.log('[GAPI-WS] Content script stale, injecting...');
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab_id },
+            files: ['content-site-registry.js', 'content-site-gemini.js', 'content-site-claude.js', 'content.js']
+          });
+          await new Promise(r => setTimeout(r, 1500));
+          const response = await trySend(tab_id, buildMsg());
+          sendResult({ success: true, data: response });
+        } catch (retryErr) {
+          console.error('[GAPI-WS] Send failed after inject:', retryErr);
+          sendResult({ success: false, error: retryErr.message });
+        }
+      } else {
+        console.error('[GAPI-WS] Send failed:', err);
+        sendResult({ success: false, error: err.message });
+      }
+    }
+  }
+
+  // Direct execution fallback — bypasses content script listeners entirely
+  async executeDirectCommand(tabId, action, message) {
+    if (action === 'GET_LAST_RESPONSE') {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          // Try multiple selectors to find AI response elements
+          const selectors = [
+            'message-content',
+            '.message-content',
+            '[class*="model-response"]',
+            '[data-role="model"]',
+            '[data-message-role="model"]',
+            '[class*="assistant"]'
+          ];
+          let elements = [];
+          for (const sel of selectors) {
+            elements = document.querySelectorAll(sel);
+            if (elements.length > 0) break;
+          }
+          if (elements.length === 0) {
+            return { status: 'failed', reason: 'No AI response found' };
+          }
+          const last = elements[elements.length - 1];
+          const clone = last.cloneNode(true);
+          clone.querySelectorAll('button, [role="button"], [aria-label], .thinking-toggle').forEach(n => n.remove());
+          const text = clone.innerText.replace(/\s+/g, ' ').trim();
+          return { status: 'success', data: text };
+        }
+      });
+      return results[0]?.result || { status: 'failed', reason: 'Script execution returned no result' };
+    }
+
+    if (action === 'sendMessage' || action === 'SEND_MESSAGE' || action === 'ACTION_SEND_MESSAGE') {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (text) => {
+          return new Promise((resolve) => {
+            const selectors = [
+              'div[contenteditable="true"][role="textbox"]',
+              '[contenteditable="true"][role="textbox"]',
+              'div[contenteditable="true"]',
+              'textarea'
+            ];
+            let input = null;
+            for (const sel of selectors) {
+              input = document.querySelector(sel);
+              if (input) break;
+            }
+            if (!input) { resolve({ status: 'failed', reason: 'Input field not found' }); return; }
+
+            // Clear and focus
+            input.focus();
+            if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
+              input.value = text;
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            } else {
+              // contenteditable — use textContent + InputEvent to trigger framework state update
+              input.textContent = text;
+              input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+            }
+
+            // Wait for send button to become enabled, then click
+            let attempts = 0;
+            const tryClick = () => {
+              const btnSels = [
+                'button[aria-label*="Send message"]',
+                'button[aria-label*="Send"]',
+                'button[aria-label*="傳送訊息"]',
+                'button[aria-label*="傳送"]',
+                'button[aria-label*="send"]',
+                'button[type="submit"]'
+              ];
+              for (const sel of btnSels) {
+                const btn = document.querySelector(sel);
+                if (btn && !btn.disabled) { btn.click(); resolve({ status: 'success' }); return; }
+              }
+              attempts++;
+              if (attempts < 10) { setTimeout(tryClick, 200); }
+              else { resolve({ status: 'failed', reason: 'Send button not found or disabled' }); }
+            };
+            setTimeout(tryClick, 300);
+          });
+        },
+        args: [message]
+      });
+      return results[0]?.result || { status: 'failed', reason: 'Script execution returned no result' };
+    }
+
+    throw new Error(`Unsupported direct action: ${action}`);
+  }
+
   async syncPages() {
     if (!this.authenticated) return;
     try {
@@ -1206,6 +1414,43 @@ chrome.runtime.onInstalled.addListener(async () => {
     }
   });
 });
+
+// ========== 遠端更新：重新注入 Content Scripts ==========
+// 用 chrome.scripting.executeScript 把最新檔案注入到 AI 分頁（不刷新頁面、不重啟 Extension）
+async function reinjectContentScripts() {
+  const AI_URL_PATTERNS = [
+    'https://gemini.google.com/*',
+    'https://claude.ai/*'
+  ];
+  const SCRIPTS = [
+    'content-site-registry.js',
+    'content-site-gemini.js',
+    'content-site-claude.js',
+    'content.js'
+  ];
+  let injected = 0;
+  for (const pattern of AI_URL_PATTERNS) {
+    try {
+      const tabs = await chrome.tabs.query({ url: pattern });
+      for (const tab of tabs) {
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: SCRIPTS
+          });
+          injected++;
+          console.log(`[GAPI] Scripts injected into tab ${tab.id} (${tab.url})`);
+        } catch (err) {
+          console.warn(`[GAPI] Inject failed for tab ${tab.id}:`, err.message);
+        }
+      }
+    } catch (err) {
+      console.warn(`[GAPI] Tab query failed for ${pattern}:`, err.message);
+    }
+  }
+  console.log(`[GAPI] Injection complete: ${injected} tab(s)`);
+  return injected;
+}
 
 // 檢查並管理 Side Panel（根據標籤頁是否為 Gemini 頁面）
 async function manageSidePanelForTab(tabId, tab) {
@@ -3549,8 +3794,12 @@ function parseUserProfileFromUrl(url) {
 function parseChatIdFromUrl(url) {
   try {
     if (!url) return null;
-    const m = url.match(/\/app\/([^/?#]+)/);
-    if (m && m[1]) return m[1];
+    // Gemini: /app/{chatId}
+    const gemini = url.match(/\/app\/([^/?#]+)/);
+    if (gemini && gemini[1]) return gemini[1];
+    // Claude: /chat/{uuid}
+    const claude = url.match(/\/chat\/([^/?#]+)/);
+    if (claude && claude[1]) return claude[1];
     return null;
   } catch {
     return null;

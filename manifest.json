@@ -10,7 +10,8 @@
     "downloads",
     "sidePanel",
     "webRequest",
-    "alarms"
+    "alarms",
+    "scripting"
   ],
   "host_permissions": [
     "https://gemini.google.com/*",
@@ -27,6 +28,12 @@
   },
   "background": {
     "service_worker": "background.js"
+  },
+  "externally_connectable": {
+    "matches": [
+      "http://localhost/*",
+      "http://127.0.0.1/*"
+    ]
   },
   "content_scripts": [
     {

@@ -937,8 +937,16 @@
         const adapter = registry ? registry.getCurrentAdapter() : null;
 
         if (message.action === 'GET_LAST_RESPONSE') {
+            // Try scraperSelector first, then modelResponseSelectors as fallback
+            let elements = [];
             const scraperSel = (adapter && adapter.scraperSelector) || '.message-content';
-            const elements = document.querySelectorAll(scraperSel);
+            elements = document.querySelectorAll(scraperSel);
+            if (elements.length === 0 && adapter && adapter.modelResponseSelectors) {
+              for (const sel of adapter.modelResponseSelectors) {
+                elements = document.querySelectorAll(sel);
+                if (elements.length > 0) break;
+              }
+            }
             if (elements.length > 0) {
                 const rawElement = elements[elements.length - 1];
                 

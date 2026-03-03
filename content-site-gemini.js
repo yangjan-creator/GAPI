@@ -148,6 +148,7 @@
     ],
 
     modelResponseSelectors: [
+      'message-content',
       '[class*="model-response"]',
       '[class*="modelResponse"]',
       '[class*="model_response"]',
@@ -201,7 +202,7 @@
     ],
 
     // 簡易 scraper selector（用於 GET_LAST_RESPONSE 等快速操作）
-    scraperSelector: '.message-content',
+    scraperSelector: 'message-content, .message-content',
 
     // ========== Debug Selector ==========
     debugSelectors: [

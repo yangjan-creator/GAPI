@@ -616,6 +616,26 @@ class WebSocketManager:
             except Exception:
                 pass
 
+    async def send_to_extension(self, extension_id: str, message: dict):
+        """Send a message to a specific extension's WebSocket."""
+        session_id = self.extension_to_session.get(extension_id)
+        if session_id:
+            await self.send(session_id, message)
+            return True
+        return False
+
+    def find_extension_for_tab(self, tab_id: int) -> Optional[str]:
+        """Find which extension owns a given tab_id."""
+        for ext_id in self.extension_to_session:
+            pages = page_registry.get_pages(ext_id)
+            for p in pages:
+                if p.get("tab_id") == tab_id:
+                    return ext_id
+        return None
+
+
+# Pending tab commands awaiting extension response
+pending_tab_commands: Dict[str, asyncio.Future] = {}
 
 manager = WebSocketManager()
 
@@ -635,6 +655,9 @@ class ActivePageRegistry:
     def remove(self, extension_id: str):
         self._pages.pop(extension_id, None)
         self._last_updated.pop(extension_id, None)
+
+    def get_pages(self, extension_id: str) -> list:
+        return self._pages.get(extension_id, [])
 
     def get_all(self) -> list:
         result = []
@@ -822,6 +845,14 @@ async def handle_websocket_message(websocket: WebSocket, session_id: str, msg: d
             "type": "message_sent",
             "payload": {"message_id": new_msg.id, "status": "ok"}
         }))
+
+    elif msg_type == "tab_command_result":
+        # Extension responding to a tab_command
+        command_id = payload.get("command_id")
+        if command_id and command_id in pending_tab_commands:
+            future = pending_tab_commands.pop(command_id)
+            if not future.done():
+                future.set_result(payload)
 
     elif msg_type == "pages_sync":
         pages = payload.get("pages", [])
@@ -1043,6 +1074,174 @@ async def send_message_endpoint(data: MessageSend, auth=Depends(verify_auth)):
         })
 
     return {"message_id": msg_id, "status": "queued"}
+
+
+# ========== Tab Command Endpoints ==========
+
+class TabSendRequest(BaseModel):
+    message: str
+    wait_response: bool = True
+    timeout: int = 60
+
+
+@app.post("/v1/tabs/{tab_id}/send")
+async def send_to_tab(tab_id: int, data: TabSendRequest, auth=Depends(verify_auth)):
+    """Send a message to a browser tab via the connected extension."""
+    ext_id = manager.find_extension_for_tab(tab_id)
+    if not ext_id:
+        raise HTTPException(status_code=404, detail="Tab not found or no extension connected")
+
+    command_id = f"cmd_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+
+    # Send tab_command to extension via WebSocket
+    sent = await manager.send_to_extension(ext_id, {
+        "type": "tab_command",
+        "payload": {
+            "command_id": command_id,
+            "tab_id": tab_id,
+            "action": "sendMessage",
+            "message": data.message
+        }
+    })
+
+    if not sent:
+        raise HTTPException(status_code=502, detail="Extension WebSocket not available")
+
+    if not data.wait_response:
+        return {"command_id": command_id, "status": "sent"}
+
+    # Wait for extension to respond via tab_command_result
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    pending_tab_commands[command_id] = future
+
+    try:
+        result = await asyncio.wait_for(future, timeout=data.timeout)
+        return {"command_id": command_id, "status": "ok", "result": result}
+    except asyncio.TimeoutError:
+        pending_tab_commands.pop(command_id, None)
+        raise HTTPException(status_code=504, detail="Extension did not respond in time")
+
+
+@app.post("/v1/tabs/{tab_id}/get-response")
+async def get_tab_response(tab_id: int, auth=Depends(verify_auth)):
+    """Get the last AI response from a browser tab."""
+    ext_id = manager.find_extension_for_tab(tab_id)
+    if not ext_id:
+        raise HTTPException(status_code=404, detail="Tab not found or no extension connected")
+
+    command_id = f"cmd_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+
+    sent = await manager.send_to_extension(ext_id, {
+        "type": "tab_command",
+        "payload": {
+            "command_id": command_id,
+            "tab_id": tab_id,
+            "action": "GET_LAST_RESPONSE"
+        }
+    })
+
+    if not sent:
+        raise HTTPException(status_code=502, detail="Extension WebSocket not available")
+
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    pending_tab_commands[command_id] = future
+
+    try:
+        result = await asyncio.wait_for(future, timeout=30)
+        return {"command_id": command_id, "status": "ok", "result": result}
+    except asyncio.TimeoutError:
+        pending_tab_commands.pop(command_id, None)
+        raise HTTPException(status_code=504, detail="Extension did not respond in time")
+
+
+class TabCreateRequest(BaseModel):
+    url: str = "https://gemini.google.com/app"
+    wait_ready: bool = True  # wait for tab to register in active pages
+
+
+@app.post("/v1/tabs/create")
+async def create_tab(data: TabCreateRequest, auth=Depends(verify_auth)):
+    """Create a new browser tab via the connected extension."""
+    if not manager.extension_to_session:
+        raise HTTPException(status_code=404, detail="No extensions connected")
+
+    ext_id = next(iter(manager.extension_to_session))
+    command_id = f"cmd_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+
+    sent = await manager.send_to_extension(ext_id, {
+        "type": "tab_command",
+        "payload": {
+            "command_id": command_id,
+            "tab_id": 0,
+            "action": "createTab",
+            "message": data.url
+        }
+    })
+
+    if not sent:
+        raise HTTPException(status_code=502, detail="Extension WebSocket not available")
+
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    pending_tab_commands[command_id] = future
+
+    try:
+        result = await asyncio.wait_for(future, timeout=15)
+        return {"command_id": command_id, "status": "ok", "result": result}
+    except asyncio.TimeoutError:
+        pending_tab_commands.pop(command_id, None)
+        raise HTTPException(status_code=504, detail="Tab creation timed out")
+
+
+# ========== Extension Management ==========
+class ReloadRequest(BaseModel):
+    mode: str = "soft"  # "soft" = reinject scripts, "hard" = restart Chrome
+    urls: Optional[list] = None  # tabs to open after restart
+
+@app.post("/v1/extension/reload")
+async def reload_extension(data: ReloadRequest = ReloadRequest(), auth=Depends(verify_auth)):
+    """Reload extension. mode=soft: reinject content scripts. mode=hard: restart Chrome."""
+    if data.mode == "hard":
+        import subprocess, shutil
+        urls = data.urls or ["https://gemini.google.com"]
+        try:
+            # Kill Chrome — try WSL path first, then bare command
+            taskkill = "/mnt/c/Windows/system32/taskkill.exe"
+            if not os.path.exists(taskkill):
+                taskkill = shutil.which("taskkill.exe") or "taskkill.exe"
+            subprocess.run([taskkill, "/F", "/IM", "chrome.exe"],
+                           capture_output=True, timeout=10)
+            await asyncio.sleep(3)
+            # Reopen Chrome — use cmd.exe to launch (most reliable from WSL)
+            url_args = " ".join(f'"{u}"' for u in urls)
+            subprocess.Popen(
+                ["cmd.exe", "/C", "start", "", "chrome.exe"] + urls,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except Exception as e:
+            logger.error("Hard reload failed: %s", e)
+            raise HTTPException(status_code=500, detail=f"Hard reload failed: {e}")
+        return {
+            "status": "ok",
+            "mode": "hard",
+            "message": "Chrome restarted",
+            "urls": urls,
+            "note": "Extension will auto-load and reconnect"
+        }
+
+    # Soft mode: reinject content scripts via WebSocket
+    sent = 0
+    for client_id, ws in list(manager.active_connections.items()):
+        try:
+            await ws.send_text(json.dumps({"type": "reload_extension"}))
+            sent += 1
+        except Exception:
+            pass
+    if sent == 0:
+        raise HTTPException(status_code=404, detail="No extensions connected")
+    return {"status": "ok", "mode": "soft", "message": f"Reinject sent to {sent} extension(s)"}
 
 
 # ========== Image Endpoints ==========
