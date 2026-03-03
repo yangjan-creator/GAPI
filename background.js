@@ -556,7 +556,8 @@ class GAPIWebSocketClient {
     // SEND_MESSAGE: use content script handler (more reliable for framework state)
     const directActions = [
       'GET_LAST_RESPONSE', 'EXTRACT_IMAGES', 'inspectDOM', 'inspectMessages', 'inspectReply',
-      'inspectToolCalls', 'expandToolCalls', 'customQuery'
+      'inspectToolCalls', 'expandToolCalls', 'customQuery',
+      'NEBULA_LIST_FILES', 'NEBULA_GET_FILE'
     ];
     if (directActions.includes(action)) {
       try {
@@ -1402,6 +1403,139 @@ class GAPIWebSocketClient {
         args: [selector]
       });
       return results[0]?.result || { status: 'failed', reason: 'No result' };
+    }
+
+    // NEBULA_LIST_FILES: extract auth token + thread_id from page, then call Nebula API
+    if (action === 'NEBULA_LIST_FILES') {
+      // Step 1: Extract auth token and thread_id from the Nebula tab
+      const extractResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          // Extract thread_id from URL: /chat/channel/{thread_id}
+          const urlMatch = location.pathname.match(/\/chat\/channel\/([^/?#]+)/);
+          const threadId = urlMatch ? urlMatch[1] : null;
+
+          // Extract auth token from localStorage — scan for JWT (starts with eyJ)
+          let authToken = null;
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            const value = localStorage.getItem(key);
+            if (value && typeof value === 'string' && value.startsWith('eyJ')) {
+              authToken = value;
+              break;
+            }
+          }
+
+          return { threadId, authToken };
+        }
+      });
+
+      const extracted = extractResults[0]?.result;
+      if (!extracted) {
+        return { status: 'failed', reason: 'Script execution returned no result' };
+      }
+      if (!extracted.authToken) {
+        return { status: 'failed', reason: 'No auth token found in localStorage' };
+      }
+      if (!extracted.threadId) {
+        return { status: 'failed', reason: 'Could not extract thread_id from URL (expected /chat/channel/{thread_id})' };
+      }
+
+      // Step 2: Call Nebula API from the background service worker
+      try {
+        const apiUrl = `https://api.nebula.gg/files?thread_id=${encodeURIComponent(extracted.threadId)}&sort_by=created_at&sort_order=desc`;
+        const resp = await fetch(apiUrl, {
+          method: 'GET',
+          headers: {
+            'x-secret-key': extracted.authToken,
+            'Accept': 'application/json'
+          }
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => '');
+          return { status: 'failed', reason: `Nebula API returned ${resp.status}: ${errText.substring(0, 500)}` };
+        }
+
+        const data = await resp.json();
+        // Return trimmed file list with essential fields
+        const files = (Array.isArray(data) ? data : data.files || data.data || []).map(f => ({
+          id: f.id,
+          filename: f.filename,
+          file_extension: f.file_extension,
+          size_bytes: f.size_bytes,
+          folder_path: f.folder_path,
+          source: f.source,
+          created_at: f.created_at
+        }));
+
+        return { status: 'success', thread_id: extracted.threadId, files, total: files.length };
+      } catch (fetchErr) {
+        return { status: 'failed', reason: `Nebula API fetch error: ${fetchErr.message}` };
+      }
+    }
+
+    // NEBULA_GET_FILE: extract auth token from page, then fetch file content from Nebula API
+    if (action === 'NEBULA_GET_FILE') {
+      const fileId = payload.file_id;
+      if (!fileId) {
+        return { status: 'failed', reason: 'No file_id provided in payload' };
+      }
+
+      // Step 1: Extract auth token from the Nebula tab
+      const extractResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          let authToken = null;
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            const value = localStorage.getItem(key);
+            if (value && typeof value === 'string' && value.startsWith('eyJ')) {
+              authToken = value;
+              break;
+            }
+          }
+          return { authToken };
+        }
+      });
+
+      const extracted = extractResults[0]?.result;
+      if (!extracted) {
+        return { status: 'failed', reason: 'Script execution returned no result' };
+      }
+      if (!extracted.authToken) {
+        return { status: 'failed', reason: 'No auth token found in localStorage' };
+      }
+
+      // Step 2: Call Nebula API from the background service worker
+      try {
+        const apiUrl = `https://api.nebula.gg/files/${encodeURIComponent(fileId)}/content`;
+        const resp = await fetch(apiUrl, {
+          method: 'GET',
+          headers: {
+            'x-secret-key': extracted.authToken,
+            'Accept': 'application/json'
+          }
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => '');
+          return { status: 'failed', reason: `Nebula API returned ${resp.status}: ${errText.substring(0, 500)}` };
+        }
+
+        // Try JSON first, fall back to text
+        const contentType = resp.headers.get('content-type') || '';
+        let content;
+        if (contentType.includes('application/json')) {
+          content = await resp.json();
+        } else {
+          content = await resp.text();
+        }
+
+        return { status: 'success', file_id: fileId, content };
+      } catch (fetchErr) {
+        return { status: 'failed', reason: `Nebula API fetch error: ${fetchErr.message}` };
+      }
     }
 
     throw new Error(`Unsupported direct action: ${action}`);

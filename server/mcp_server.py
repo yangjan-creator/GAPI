@@ -1290,6 +1290,92 @@ async def create_tab(data: TabCreateRequest, auth=Depends(verify_auth)):
         raise HTTPException(status_code=504, detail="Tab creation timed out")
 
 
+# ========== Nebula File Endpoints ==========
+
+@app.get("/v1/nebula/tabs/{tab_id}/files")
+async def nebula_list_files(tab_id: int, auth=Depends(verify_auth)):
+    """List files created in the Nebula thread associated with this tab.
+
+    Sends a NEBULA_LIST_FILES command to the extension, which extracts the
+    auth token and thread_id from the Nebula page and calls the Nebula API.
+    """
+    ext_id = manager.find_extension_for_tab(tab_id)
+    if not ext_id:
+        # Fallback: try any connected extension
+        if manager.extension_to_session:
+            ext_id = next(iter(manager.extension_to_session))
+        else:
+            raise HTTPException(status_code=404, detail="No extension connected")
+
+    command_id = f"cmd_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+
+    sent = await manager.send_to_extension(ext_id, {
+        "type": "tab_command",
+        "payload": {
+            "command_id": command_id,
+            "tab_id": tab_id,
+            "action": "NEBULA_LIST_FILES"
+        }
+    })
+
+    if not sent:
+        raise HTTPException(status_code=502, detail="Extension WebSocket not available")
+
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    pending_tab_commands[command_id] = future
+
+    try:
+        result = await asyncio.wait_for(future, timeout=15)
+        return {"command_id": command_id, "status": "ok", "result": result}
+    except asyncio.TimeoutError:
+        pending_tab_commands.pop(command_id, None)
+        raise HTTPException(status_code=504, detail="Extension did not respond in time")
+
+
+@app.get("/v1/nebula/tabs/{tab_id}/files/{file_id}")
+async def nebula_get_file(tab_id: int, file_id: str, auth=Depends(verify_auth)):
+    """Get content of a specific Nebula file.
+
+    Sends a NEBULA_GET_FILE command to the extension with the file_id,
+    which extracts the auth token from the Nebula page and calls the
+    Nebula API to retrieve the file content.
+    """
+    ext_id = manager.find_extension_for_tab(tab_id)
+    if not ext_id:
+        # Fallback: try any connected extension
+        if manager.extension_to_session:
+            ext_id = next(iter(manager.extension_to_session))
+        else:
+            raise HTTPException(status_code=404, detail="No extension connected")
+
+    command_id = f"cmd_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+
+    sent = await manager.send_to_extension(ext_id, {
+        "type": "tab_command",
+        "payload": {
+            "command_id": command_id,
+            "tab_id": tab_id,
+            "action": "NEBULA_GET_FILE",
+            "file_id": file_id
+        }
+    })
+
+    if not sent:
+        raise HTTPException(status_code=502, detail="Extension WebSocket not available")
+
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    pending_tab_commands[command_id] = future
+
+    try:
+        result = await asyncio.wait_for(future, timeout=15)
+        return {"command_id": command_id, "status": "ok", "result": result}
+    except asyncio.TimeoutError:
+        pending_tab_commands.pop(command_id, None)
+        raise HTTPException(status_code=504, detail="Extension did not respond in time")
+
+
 # ========== Extension Management ==========
 class ReloadRequest(BaseModel):
     mode: str = "soft"  # "soft" = reinject scripts, "hard" = restart Chrome
