@@ -555,7 +555,7 @@ class GAPIWebSocketClient {
     // GET_LAST_RESPONSE / inspect* / customQuery / expandToolCalls: always use direct execution (chrome.scripting)
     // SEND_MESSAGE: use content script handler (more reliable for framework state)
     const directActions = [
-      'GET_LAST_RESPONSE', 'inspectDOM', 'inspectMessages', 'inspectReply',
+      'GET_LAST_RESPONSE', 'EXTRACT_IMAGES', 'inspectDOM', 'inspectMessages', 'inspectReply',
       'inspectToolCalls', 'expandToolCalls', 'customQuery'
     ];
     if (directActions.includes(action)) {
@@ -702,8 +702,179 @@ class GAPIWebSocketClient {
           const clone = last.cloneNode(true);
           clone.querySelectorAll('button, [role="button"], [aria-label], .thinking-toggle').forEach(n => n.remove());
           const text = clone.innerText.replace(/\s+/g, ' ').trim();
-          return text ? { status: 'success', data: text } : { status: 'failed', reason: 'Empty AI response' };
+
+          // Extract images from the last response container
+          const imageDomains = ['googleusercontent.com', 'gstatic.com', 'ggpht.com', 'google.com/images'];
+          const images = [];
+          last.querySelectorAll('img').forEach((img, idx) => {
+            const src = img.src || '';
+            if (!src) return;
+            // Filter: must be from an image-hosting domain, skip tiny icons/avatars
+            const isHosted = imageDomains.some(d => src.includes(d));
+            const w = img.naturalWidth || img.width || 0;
+            const h = img.naturalHeight || img.height || 0;
+            if (isHosted && (w > 48 || h > 48 || (w === 0 && h === 0))) {
+              images.push({
+                src,
+                alt: img.alt || '',
+                width: img.width || 0,
+                height: img.height || 0,
+                naturalWidth: img.naturalWidth || 0,
+                naturalHeight: img.naturalHeight || 0,
+                index: idx
+              });
+            }
+          });
+
+          if (!text && images.length === 0) return { status: 'failed', reason: 'Empty AI response' };
+          return { status: 'success', data: text, images };
         }
+      });
+      return results[0]?.result || { status: 'failed', reason: 'Script execution returned no result' };
+    }
+
+    if (action === 'EXTRACT_IMAGES') {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (messageIndex) => {
+          const host = location.hostname;
+
+          // Image-hosting domains to match against
+          const imageDomains = ['googleusercontent.com', 'gstatic.com', 'ggpht.com', 'google.com/images'];
+
+          // Helper: extract image info from a container element
+          const extractImages = (container) => {
+            const imgs = [];
+            container.querySelectorAll('img').forEach((img, idx) => {
+              const src = img.src || '';
+              if (!src) return;
+              // Must be from an image-hosting domain
+              const isHosted = imageDomains.some(d => src.includes(d));
+              if (!isHosted) return;
+              // Skip tiny icons and avatars (<=48px in both dimensions)
+              const w = img.naturalWidth || img.width || 0;
+              const h = img.naturalHeight || img.height || 0;
+              if (w > 0 && w <= 48 && h > 0 && h <= 48) return;
+              imgs.push({
+                src,
+                alt: img.alt || '',
+                width: img.width || 0,
+                height: img.height || 0,
+                naturalWidth: img.naturalWidth || 0,
+                naturalHeight: img.naturalHeight || 0,
+                index: idx
+              });
+            });
+            return imgs;
+          };
+
+          // --- Gemini ---
+          if (host.includes('gemini.google.com')) {
+            // Find model response containers
+            const responseSelectors = [
+              'message-content', '.message-content',
+              '[class*="model-response"]', '[data-role="model"]',
+              '[data-message-role="model"]'
+            ];
+            let responseBlocks = [];
+            for (const sel of responseSelectors) {
+              responseBlocks = Array.from(document.querySelectorAll(sel));
+              if (responseBlocks.length > 0) break;
+            }
+            if (responseBlocks.length === 0) {
+              return { status: 'failed', reason: 'No model response containers found' };
+            }
+
+            // If message_index specified, extract from that block only
+            if (typeof messageIndex === 'number' && messageIndex >= 0) {
+              if (messageIndex >= responseBlocks.length) {
+                return { status: 'failed', reason: `message_index ${messageIndex} out of range (total: ${responseBlocks.length})` };
+              }
+              const imgs = extractImages(responseBlocks[messageIndex]);
+              return { status: 'success', total_responses: responseBlocks.length, message_index: messageIndex, images: imgs };
+            }
+
+            // Extract from all response blocks
+            const allImages = [];
+            responseBlocks.forEach((block, blockIdx) => {
+              const imgs = extractImages(block);
+              imgs.forEach(img => {
+                allImages.push({ ...img, message_index: blockIdx });
+              });
+            });
+            return { status: 'success', total_responses: responseBlocks.length, images: allImages };
+          }
+
+          // --- Claude ---
+          if (host.includes('claude.ai')) {
+            const selectors = [
+              '[class*="response"]',
+              '.font-claude-message',
+              '[data-testid="ai-turn"]',
+              '[data-role="assistant"]',
+              '[data-message-author-role="assistant"]'
+            ];
+            let responseBlocks = [];
+            for (const sel of selectors) {
+              responseBlocks = Array.from(document.querySelectorAll(sel));
+              if (responseBlocks.length > 0) break;
+            }
+            if (responseBlocks.length === 0) {
+              return { status: 'failed', reason: 'No AI response containers found on Claude' };
+            }
+
+            if (typeof messageIndex === 'number' && messageIndex >= 0) {
+              if (messageIndex >= responseBlocks.length) {
+                return { status: 'failed', reason: `message_index ${messageIndex} out of range (total: ${responseBlocks.length})` };
+              }
+              const imgs = extractImages(responseBlocks[messageIndex]);
+              return { status: 'success', total_responses: responseBlocks.length, message_index: messageIndex, images: imgs };
+            }
+
+            const allImages = [];
+            responseBlocks.forEach((block, blockIdx) => {
+              const imgs = extractImages(block);
+              imgs.forEach(img => {
+                allImages.push({ ...img, message_index: blockIdx });
+              });
+            });
+            return { status: 'success', total_responses: responseBlocks.length, images: allImages };
+          }
+
+          // --- Generic fallback ---
+          const fallbackSelectors = [
+            '[data-role="assistant"]',
+            '[data-message-author-role="assistant"]',
+            '[class*="assistant"]',
+            '[class*="response"]'
+          ];
+          let responseBlocks = [];
+          for (const sel of fallbackSelectors) {
+            responseBlocks = Array.from(document.querySelectorAll(sel));
+            if (responseBlocks.length > 0) break;
+          }
+          if (responseBlocks.length === 0) {
+            return { status: 'failed', reason: 'No AI response containers found' };
+          }
+
+          if (typeof messageIndex === 'number' && messageIndex >= 0) {
+            if (messageIndex >= responseBlocks.length) {
+              return { status: 'failed', reason: `message_index ${messageIndex} out of range (total: ${responseBlocks.length})` };
+            }
+            const imgs = extractImages(responseBlocks[messageIndex]);
+            return { status: 'success', total_responses: responseBlocks.length, message_index: messageIndex, images: imgs };
+          }
+
+          const allImages = [];
+          responseBlocks.forEach((block, blockIdx) => {
+            const imgs = extractImages(block);
+            imgs.forEach(img => {
+              allImages.push({ ...img, message_index: blockIdx });
+            });
+          });
+          return { status: 'success', total_responses: responseBlocks.length, images: allImages };
+        },
+        args: [payload.message_index !== undefined ? payload.message_index : null]
       });
       return results[0]?.result || { status: 'failed', reason: 'Script execution returned no result' };
     }
