@@ -4,7 +4,17 @@
 (function() {
   'use strict';
 
-  console.log('[Gemini 分類助手] Content Script 開始載入...');
+  // ========== 日誌等級控制 ==========
+  // 0=silent, 1=error, 2=warn, 3=info, 4=debug
+  const LOG_LEVEL = 2; // 預設只輸出 error + warn
+  const _log = {
+    error: (...args) => LOG_LEVEL >= 1 && console.error('[GAPI]', ...args),
+    warn:  (...args) => LOG_LEVEL >= 2 && console.warn('[GAPI]', ...args),
+    info:  (...args) => LOG_LEVEL >= 3 && console.log('[GAPI]', ...args),
+    debug: (...args) => LOG_LEVEL >= 4 && console.log('[GAPI][DBG]', ...args),
+  };
+
+  _log.info('Content Script 開始載入...');
 
   // 【解決 Context 失效】加入攔截機制，當偵測到 Extension context invalidated 錯誤時，自動在畫面上方顯示提示
   function showContextInvalidatedWarning() {
@@ -83,7 +93,7 @@
         if (errorMessage.includes('Extension context invalidated') || 
             errorMessage.includes('context invalidated') ||
             errorMessage.includes('message port closed')) {
-          console.error('[Gemini 分類助手] ⚠️ Extension context invalidated 錯誤偵測到');
+          _log.error('[Gemini 分類助手] ⚠️ Extension context invalidated 錯誤偵測到');
           showContextInvalidatedWarning();
           return null;
         }
@@ -93,7 +103,7 @@
       const errorMessage = error.message || '';
       if (errorMessage.includes('Extension context invalidated') || 
           errorMessage.includes('context invalidated')) {
-        console.error('[Gemini 分類助手] ⚠️ Extension context invalidated 錯誤偵測到');
+        _log.error('[Gemini 分類助手] ⚠️ Extension context invalidated 錯誤偵測到');
         showContextInvalidatedWarning();
         return null;
       }
@@ -215,7 +225,7 @@
       
       return value;
     } catch (error) {
-      console.error('[Storage] 讀取失敗:', error);
+      _log.error('[Storage] 讀取失敗:', error);
       return defaultValue;
     }
   }
@@ -250,7 +260,7 @@
 
       return true;
     } catch (error) {
-      console.error('[Storage] 寫入失敗:', error);
+      _log.error('[Storage] 寫入失敗:', error);
       return false;
     }
   }
@@ -269,7 +279,7 @@
         storageCache.writeTimer = null;
       }
     } catch (error) {
-      console.error('[Storage] 批量寫入失敗:', error);
+      _log.error('[Storage] 批量寫入失敗:', error);
     }
   }
 
@@ -324,7 +334,7 @@
 
       return { ...defaultValue, ...result };
     } catch (error) {
-      console.error('[Storage] 批量讀取失敗:', error);
+      _log.error('[Storage] 批量讀取失敗:', error);
       return defaultValue;
     }
   }
@@ -337,7 +347,7 @@
 
   // 切換對話時的清理函數
   function cleanupOnConversationSwitch() {
-    console.log('[Gemini 分類助手] [清理] 切換對話，清理資源...');
+    _log.debug('[Gemini 分類助手] [清理] 切換對話，清理資源...');
     
     // 1. 清理 Storage 緩存
     clearStorageCache();
@@ -355,7 +365,7 @@
     // 4. 清理 DOM 緩存
     clearDomCache();
     
-    console.log('[Gemini 分類助手] [清理] ✓ 資源清理完成');
+    _log.debug('[Gemini 分類助手] [清理] ✓ 資源清理完成');
   }
 
   // ========== 事件監聽器管理器 ==========
@@ -665,6 +675,43 @@
   let autoImageHandledMessages = new Set(); // 已處理的生圖消息（避免重複觸發）
   let lastAutoImageClickAt = 0;
   const AUTO_IMAGE_CLICK_COOLDOWN = 4000;
+
+  // ========== 定期記憶體清理 ==========
+  const MEMORY_CLEANUP_INTERVAL = 5 * 60 * 1000; // 每 5 分鐘
+  const MAX_RECORDED_MESSAGES = 500; // recordedMessages 最大保留數
+  const MAX_AUTO_IMAGE_HANDLED = 100; // autoImageHandledMessages 最大保留數
+
+  setInterval(() => {
+    // 清理 recordedMessages（保留最新的 MAX 條）
+    if (recordedMessages.size > MAX_RECORDED_MESSAGES) {
+      const arr = Array.from(recordedMessages);
+      recordedMessages = new Set(arr.slice(arr.length - MAX_RECORDED_MESSAGES));
+      _log.debug(`[Gemini 分類助手] [記憶體清理] recordedMessages: ${arr.length} → ${recordedMessages.size}`);
+    }
+
+    // 清理 autoImageHandledMessages
+    if (autoImageHandledMessages.size > MAX_AUTO_IMAGE_HANDLED) {
+      const arr = Array.from(autoImageHandledMessages);
+      autoImageHandledMessages = new Set(arr.slice(arr.length - MAX_AUTO_IMAGE_HANDLED));
+      _log.debug(`[Gemini 分類助手] [記憶體清理] autoImageHandledMessages: ${arr.length} → ${autoImageHandledMessages.size}`);
+    }
+
+    // 清理 DOM 和 Storage 緩存
+    clearDomCache();
+    storageCache.cache.clear();
+    storageCache.timestamps.clear();
+
+    // 清理 observerManager 中已失效的 observer（target 被移除）
+    for (const [name, item] of observerManager.observers.entries()) {
+      if (item.target && !document.contains(item.target)) {
+        item.observer.disconnect();
+        observerManager.observers.delete(name);
+        _log.debug(`[Gemini 分類助手] [記憶體清理] 移除失效 observer: ${name}`);
+      }
+    }
+
+    _log.debug(`[Gemini 分類助手] [記憶體清理] 完成 — recorded:${recordedMessages.size} images:${autoImageHandledMessages.size} observers:${observerManager.observers.size} domCache:0 storageCache:0`);
+  }, MEMORY_CLEANUP_INTERVAL);
   let lastModelResponseCount = 0; // 記錄上次檢測到的模型回復數量
   let scrapeTimeout = null; // 延遲提取的定時器
   let forceExtractInterval = null; // 強制提取圖片的定時器（每 2 秒掃描一次）
@@ -714,7 +761,7 @@
       
       return { exists: false, type: null };
     } catch (error) {
-      console.error('[Gemini 分類助手] [資料庫檢查] 讀取失敗:', error);
+      _log.error('[Gemini 分類助手] [資料庫檢查] 讀取失敗:', error);
       return { exists: false, type: null };
     }
   }
@@ -760,9 +807,9 @@
       
       // 使用批量寫入（延遲寫入，提高性能）
       await setStorage('download_history', history, false);
-      console.log('[Gemini 分類助手] [資料庫記錄] ✓ 已記錄到 download_history:', type);
+      _log.debug('[Gemini 分類助手] [資料庫記錄] ✓ 已記錄到 download_history:', type);
     } catch (error) {
-      console.error('[Gemini 分類助手] [資料庫記錄] 記錄失敗:', error);
+      _log.error('[Gemini 分類助手] [資料庫記錄] 記錄失敗:', error);
     }
   }
   
@@ -777,7 +824,7 @@
       
       return chatData.thumb_captured === true;
     } catch (error) {
-      console.error('[Gemini 分類助手] [資料庫檢查] 檢查預覽圖失敗:', error);
+      _log.error('[Gemini 分類助手] [資料庫檢查] 檢查預覽圖失敗:', error);
       return false;
     }
   }
@@ -796,9 +843,9 @@
       history[chatKey].thumb_captured = true;
       
       await setStorage('download_history', history);
-      console.log('[Gemini 分類助手] [資料庫記錄] ✓ 已標記預覽圖已保存（thumb_captured）');
+      _log.debug('[Gemini 分類助手] [資料庫記錄] ✓ 已標記預覽圖已保存（thumb_captured）');
     } catch (error) {
-      console.error('[Gemini 分類助手] [資料庫記錄] 標記預覽圖失敗:', error);
+      _log.error('[Gemini 分類助手] [資料庫記錄] 標記預覽圖失敗:', error);
     }
   }
   
@@ -826,7 +873,7 @@
       // 同時在控制台輸出（方便調試）- 僅在開發模式下輸出
       // 【優化】減少控制台輸出，避免產生大量日誌
       // 只在重要操作時輸出，或使用 debug 模式
-      // console.log(`[操作日誌] ${operation}:`, data); // 已禁用，避免大量日誌
+      // _log.debug(`[操作日誌] ${operation}:`, data); // 已禁用，避免大量日誌
       
       // 【修正通訊崩潰】所有 sendMessage 前必須加上檢查，防止 context invalidated 錯誤
       // 靜默處理，不輸出警告（避免重複日誌）
@@ -845,7 +892,7 @@
             if (checkRuntimeError(chrome.runtime.lastError)) {
               return;
             }
-            console.error('[操作日誌] 發送失敗:', chrome.runtime.lastError.message);
+            _log.error('[操作日誌] 發送失敗:', chrome.runtime.lastError.message);
             // 如果發送失敗，嘗試直接保存到本地存儲（備用方案）
             try {
               const storageKey = `operation_logs_${logEntry.userProfile}`;
@@ -856,21 +903,21 @@
                   logs.shift();
                 }
                 chrome.storage.local.set({ [storageKey]: logs }, () => {
-                  console.log('[操作日誌] ✓ 已保存到本地存儲（備用方案）');
+                  _log.debug('[操作日誌] ✓ 已保存到本地存儲（備用方案）');
                 });
               });
             } catch (e) {
-              console.error('[操作日誌] 備用保存也失敗:', e);
+              _log.error('[操作日誌] 備用保存也失敗:', e);
             }
           } else {
-            console.log('[操作日誌] ✓ 已發送到 Background');
+            _log.debug('[操作日誌] ✓ 已發送到 Background');
           }
         });
       } else {
         // 靜默處理，不輸出警告（避免重複日誌）
       }
     } catch (error) {
-      console.error('[操作日誌] 記錄失敗:', error);
+      _log.error('[操作日誌] 記錄失敗:', error);
     }
   }
   
@@ -894,13 +941,13 @@
         currentUserProfile = 'default';
       }
     } catch (error) {
-      console.error('[Gemini 分類助手] [用戶檢測] ❌ 檢測用戶檔案時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [用戶檢測] ❌ 檢測用戶檔案時發生錯誤:', error);
       currentUserProfile = 'default';
     }
   }
 
   function init() {
-    console.log('[Gemini 分類助手] Content Script 已載入，準備開始監測');
+    _log.debug('[Gemini 分類助手] Content Script 已載入，準備開始監測');
     
     // 初始化時檢測用戶檔案
     detectUserProfile();
@@ -913,13 +960,13 @@
 
     // 等待頁面載入完成
     if (document.readyState === 'loading') {
-      console.log('[Gemini 分類助手] 頁面載入中，等待 DOMContentLoaded...');
+      _log.debug('[Gemini 分類助手] 頁面載入中，等待 DOMContentLoaded...');
       document.addEventListener('DOMContentLoaded', () => {
-        console.log('[Gemini 分類助手] DOMContentLoaded 事件觸發');
+        _log.debug('[Gemini 分類助手] DOMContentLoaded 事件觸發');
         startMonitoring();
       });
     } else {
-      console.log('[Gemini 分類助手] 頁面已載入，立即開始監測');
+      _log.debug('[Gemini 分類助手] 頁面已載入，立即開始監測');
       startMonitoring();
     }
 
@@ -1003,7 +1050,7 @@
         }
       // 只在非頻繁的消息時才記錄日誌（減少控制台噪音）
       if (message.action !== 'getUserProfile' && message.action !== 'GET_DOWNLOAD_BUTTONS' && message.action !== 'ping') {
-        console.log('[Gemini 分類助手] 收到消息:', message);
+        _log.debug('[Gemini 分類助手] 收到消息:', message);
       }
       
       if (message.action === 'ping') {
@@ -1012,7 +1059,7 @@
         const inferred = getChatIdFromUrl(window.location.href);
         if (inferred && inferred !== currentChatId) {
           // 檢測到新的對話 ID，觸發完整的初始化流程
-          console.log('[Gemini 分類助手] [ping] 檢測到新的對話 ID:', inferred, '(舊 ID:', currentChatId, ')');
+          _log.debug('[Gemini 分類助手] [ping] 檢測到新的對話 ID:', inferred, '(舊 ID:', currentChatId, ')');
           currentChatId = inferred;
           currentTitle = null; // 重置標題，等待重新獲取
           extractionAttempts = 0; // 重置嘗試次數
@@ -1034,7 +1081,7 @@
           url: window.location.href,
           userProfile: currentUserProfile || 'default'
         };
-        console.log('[Gemini 分類助手] 回應 ping:', response);
+        _log.debug('[Gemini 分類助手] 回應 ping:', response);
         sendResponse(response);
       } else if (message.action === 'getUserProfile') {
         detectUserProfile();
@@ -1114,7 +1161,7 @@
           });
         });
         
-        console.log('[Gemini 分類助手] [調試] 找到的標題候選:', candidates);
+        _log.debug('[Gemini 分類助手] [調試] 找到的標題候選:', candidates);
         sendResponse({ status: 'ok', candidates: candidates, currentChatId: currentChatId });
       } else if (message.action === 'GET_DOWNLOAD_BUTTONS') {
         // 獲取下載按鈕列表（用於測試）
@@ -1122,7 +1169,7 @@
           const buttons = getDownloadButtonsList();
           sendResponse({ status: 'ok', buttons: buttons });
         } catch (error) {
-          console.error('[Gemini 分類助手] [下載按鈕測試] 獲取按鈕列表失敗:', error);
+          _log.error('[Gemini 分類助手] [下載按鈕測試] 獲取按鈕列表失敗:', error);
           sendResponse({ status: 'error', error: error.message });
         }
         return true;
@@ -1137,7 +1184,7 @@
           const result = clickDownloadButtonByIndex(buttonIndex);
           sendResponse(result);
         } catch (error) {
-          console.error('[Gemini 分類助手] [下載按鈕測試] 點擊按鈕失敗:', error);
+          _log.error('[Gemini 分類助手] [下載按鈕測試] 點擊按鈕失敗:', error);
           sendResponse({ status: 'error', error: error.message });
         }
         return true;
@@ -1147,32 +1194,32 @@
           const result = clickBestDownloadButton();
           sendResponse(result);
         } catch (error) {
-          console.error('[Gemini 分類助手] [下載按鈕測試] 自動點擊失敗:', error);
+          _log.error('[Gemini 分類助手] [下載按鈕測試] 自動點擊失敗:', error);
           sendResponse({ status: 'error', error: error.message });
         }
         return true;
       } else if (message.action === 'sendMessage' || message.action === 'SEND_MESSAGE') {
         // 從側邊欄發送消息（異步處理）
         const messageText = message.messageText || message.text || message.content || '';
-        console.log('[Gemini 分類助手] [消息監聽] ========== 收到發送消息請求 ==========');
-        console.log('[Gemini 分類助手] [消息監聽] Action:', message.action);
-        console.log('[Gemini 分類助手] [消息監聽] 消息長度:', messageText.length, '字符');
-        console.log('[Gemini 分類助手] [消息監聽] 消息預覽:', messageText.substring(0, 100));
-        console.log('[Gemini 分類助手] [消息監聽] 當前 ChatId:', currentChatId);
-        console.log('[Gemini 分類助手] [消息監聽] 當前 URL:', window.location.href);
+        _log.debug('[Gemini 分類助手] [消息監聽] ========== 收到發送消息請求 ==========');
+        _log.debug('[Gemini 分類助手] [消息監聽] Action:', message.action);
+        _log.debug('[Gemini 分類助手] [消息監聽] 消息長度:', messageText.length, '字符');
+        _log.debug('[Gemini 分類助手] [消息監聽] 消息預覽:', messageText.substring(0, 100));
+        _log.debug('[Gemini 分類助手] [消息監聽] 當前 ChatId:', currentChatId);
+        _log.debug('[Gemini 分類助手] [消息監聽] 當前 URL:', window.location.href);
         
         if (!messageText || !messageText.trim()) {
-          console.error('[Gemini 分類助手] [消息監聽] ❌ 消息內容為空');
+          _log.error('[Gemini 分類助手] [消息監聽] ❌ 消息內容為空');
           sendResponse({ success: false, error: '消息內容為空' });
           return true;
         }
         
         sendMessageToSite(messageText).then(result => {
-          console.log('[Gemini 分類助手] [消息監聽] 發送消息結果:', result);
+          _log.debug('[Gemini 分類助手] [消息監聽] 發送消息結果:', result);
           sendResponse(result);
         }).catch(error => {
-          console.error('[Gemini 分類助手] [消息監聽] 發送消息時發生錯誤:', error);
-          console.error('[Gemini 分類助手] [消息監聽] 錯誤堆疊:', error.stack);
+          _log.error('[Gemini 分類助手] [消息監聽] 發送消息時發生錯誤:', error);
+          _log.error('[Gemini 分類助手] [消息監聽] 錯誤堆疊:', error.stack);
           sendResponse({ success: false, error: error.message || String(error) });
         });
         return true; // 保持通道開啟用於異步響應
@@ -1194,10 +1241,10 @@
         return true;
       } else if (message.action === 'getConversationMessages') {
         // 獲取當前對話的消息歷史
-        console.log('[Gemini 分類助手] [消息監聽] ========== 收到獲取對話記錄請求 ==========');
-        console.log('[Gemini 分類助手] [消息監聽] 當前 ChatId:', currentChatId);
-        console.log('[Gemini 分類助手] [消息監聽] 當前 URL:', window.location.href);
-        console.log('[Gemini 分類助手] [消息監聽] Runtime 有效:', isRuntimeValid());
+        _log.debug('[Gemini 分類助手] [消息監聽] ========== 收到獲取對話記錄請求 ==========');
+        _log.debug('[Gemini 分類助手] [消息監聽] 當前 ChatId:', currentChatId);
+        _log.debug('[Gemini 分類助手] [消息監聽] 當前 URL:', window.location.href);
+        _log.debug('[Gemini 分類助手] [消息監聽] Runtime 有效:', isRuntimeValid());
         
         try {
           if (!isRuntimeValid()) {
@@ -1207,16 +1254,16 @@
           }
 
           if (!currentChatId) {
-            console.warn('[Gemini 分類助手] [消息監聽] ⚠️ 沒有當前對話 ID');
+            _log.warn('[Gemini 分類助手] [消息監聽] ⚠️ 沒有當前對話 ID');
             sendResponse({ success: true, messages: [], source: 'empty', error: 'No current chat ID' });
             return true;
           }
 
-          console.log('[Gemini 分類助手] [消息監聽] ========== 開始獲取對話記錄 ==========');
+          _log.debug('[Gemini 分類助手] [消息監聽] ========== 開始獲取對話記錄 ==========');
           
           // 優化：先從存儲獲取歷史記錄，再補充新消息
           const fetchStoredMessages = new Promise((resolve, reject) => {
-            console.log('[Gemini 分類助手] [消息監聽] 步驟 1: 從存儲獲取歷史記錄...');
+            _log.debug('[Gemini 分類助手] [消息監聽] 步驟 1: 從存儲獲取歷史記錄...');
             
             // 【修正通訊崩潰】所有 sendMessage 前必須加上檢查，防止 context invalidated 錯誤
             if (!chrome.runtime?.id) {
@@ -1233,7 +1280,7 @@
               }
             }, (response) => {
               if (chrome.runtime.lastError) {
-                console.error('[Gemini 分類助手] [消息監聽] 從存儲獲取消息失敗:', chrome.runtime.lastError.message);
+                _log.error('[Gemini 分類助手] [消息監聽] 從存儲獲取消息失敗:', chrome.runtime.lastError.message);
                 resolve(null); // 返回 null 表示獲取失敗，但繼續處理
               } else {
                 resolve(response);
@@ -1245,7 +1292,7 @@
           fetchStoredMessages.then((storageResponse) => {
             // 步驟 1: 先使用存儲的歷史記錄
             const storedMessages = (storageResponse && storageResponse.messages) || [];
-            console.log('[Gemini 分類助手] [消息監聽] ✓ 從存儲獲取到', storedMessages.length, '條歷史記錄');
+            _log.debug('[Gemini 分類助手] [消息監聽] ✓ 從存儲獲取到', storedMessages.length, '條歷史記錄');
             
             // 使用 Map 進行去重（基於文本內容和角色）
             const messageMap = new Map();
@@ -1267,15 +1314,15 @@
               }
             });
             
-            console.log('[Gemini 分類助手] [消息監聽] 步驟 2: 從頁面提取新消息（補充）...');
+            _log.debug('[Gemini 分類助手] [消息監聽] 步驟 2: 從頁面提取新消息（補充）...');
             
             // 步驟 2: 從頁面提取新消息（只提取可能的新消息）
             let currentMessages = [];
             try {
               currentMessages = scrapeMessages();
-              console.log('[Gemini 分類助手] [消息監聽] ✓ 從頁面提取到', currentMessages.length, '條消息');
+              _log.debug('[Gemini 分類助手] [消息監聽] ✓ 從頁面提取到', currentMessages.length, '條消息');
             } catch (scrapeError) {
-              console.error('[Gemini 分類助手] [消息監聽] ❌ scrapeMessages() 執行失敗:', scrapeError);
+              _log.error('[Gemini 分類助手] [消息監聽] ❌ scrapeMessages() 執行失敗:', scrapeError);
               currentMessages = [];
             }
             
@@ -1292,7 +1339,7 @@
                 // 新消息，直接添加
                 messageMap.set(key, currentMsg);
                 newMessageCount++;
-                console.log('[Gemini 分類助手] [消息監聽] + 發現新消息:', (currentMsg.text || '').substring(0, 50));
+                _log.debug('[Gemini 分類助手] [消息監聽] + 發現新消息:', (currentMsg.text || '').substring(0, 50));
               } else {
                 // 已存在的消息，只更新圖片和代碼塊（如果有的話）
                 const existing = messageMap.get(key);
@@ -1303,7 +1350,7 @@
                   if (!existing.images || existing.images.length < currentMsg.images.length) {
                     existing.images = currentMsg.images;
                     updated = true;
-                    console.log('[Gemini 分類助手] [消息監聽] 📷 更新圖片:', currentMsg.images.length, '張');
+                    _log.debug('[Gemini 分類助手] [消息監聽] 📷 更新圖片:', currentMsg.images.length, '張');
                   }
                 }
                 
@@ -1321,7 +1368,7 @@
               }
             });
             
-            console.log('[Gemini 分類助手] [消息監聽] 合併結果: 新增', newMessageCount, '條，更新', updatedMessageCount, '條');
+            _log.debug('[Gemini 分類助手] [消息監聽] 合併結果: 新增', newMessageCount, '條，更新', updatedMessageCount, '條');
             
             // 轉換為數組並按時間戳排序
             const allMessages = Array.from(messageMap.values()).sort((a, b) => {
@@ -1330,8 +1377,8 @@
               return timeA - timeB;
             });
             
-            console.log('[Gemini 分類助手] [消息監聽] 合併後共', allMessages.length, '條消息（新增', newMessageCount, '條）');
-            console.log('[Gemini 分類助手] [消息監聽] ========== 返回消息完成 ==========');
+            _log.debug('[Gemini 分類助手] [消息監聽] 合併後共', allMessages.length, '條消息（新增', newMessageCount, '條）');
+            _log.debug('[Gemini 分類助手] [消息監聽] ========== 返回消息完成 ==========');
             
             // 構建響應對象
             const responseData = { 
@@ -1346,18 +1393,18 @@
             // 確保 sendResponse 被調用
             try {
               const responseSent = sendResponse(responseData);
-              console.log('[Gemini 分類助手] [消息監聽] ✓ sendResponse 已調用，返回值:', responseSent);
-              console.log('[Gemini 分類助手] [消息監聽] 響應數據:', {
+              _log.debug('[Gemini 分類助手] [消息監聽] ✓ sendResponse 已調用，返回值:', responseSent);
+              _log.debug('[Gemini 分類助手] [消息監聽] 響應數據:', {
                 success: responseData.success,
                 messageCount: responseData.totalCount,
                 source: responseData.source
               });
             } catch (e) {
-              console.error('[Gemini 分類助手] [消息監聽] ❌ sendResponse 調用失敗:', e);
-              console.error('[Gemini 分類助手] [消息監聽] 錯誤堆疊:', e.stack);
+              _log.error('[Gemini 分類助手] [消息監聽] ❌ sendResponse 調用失敗:', e);
+              _log.error('[Gemini 分類助手] [消息監聽] 錯誤堆疊:', e.stack);
             }
           }).catch((error) => {
-            console.error('[Gemini 分類助手] [消息監聽] 處理存儲消息時發生錯誤:', error);
+            _log.error('[Gemini 分類助手] [消息監聽] 處理存儲消息時發生錯誤:', error);
             // 即使出錯，也返回實時提取的消息
             try {
               sendResponse({ 
@@ -1366,37 +1413,37 @@
                 source: 'realtime',
                 error: error.message || String(error)
               });
-              console.log('[Gemini 分類助手] [消息監聽] ✓ sendResponse 已調用（錯誤情況下返回實時消息）');
+              _log.debug('[Gemini 分類助手] [消息監聽] ✓ sendResponse 已調用（錯誤情況下返回實時消息）');
             } catch (e) {
-              console.error('[Gemini 分類助手] [消息監聽] ❌ sendResponse 調用失敗（錯誤情況）:', e);
+              _log.error('[Gemini 分類助手] [消息監聽] ❌ sendResponse 調用失敗（錯誤情況）:', e);
             }
           });
           
           return true; // 保持通道開啟用於異步響應
         } catch (error) {
-          console.error('[Gemini 分類助手] [消息監聽] 獲取對話記錄時發生錯誤:', error);
-          console.error('[Gemini 分類助手] [消息監聽] 錯誤堆疊:', error.stack);
+          _log.error('[Gemini 分類助手] [消息監聽] 獲取對話記錄時發生錯誤:', error);
+          _log.error('[Gemini 分類助手] [消息監聽] 錯誤堆疊:', error.stack);
           sendResponse({ success: false, error: error.message || String(error) });
           return true;
         }
       } else if (message.action === 'scrapeMessages' || message.action === 'getCurrentMessages') {
         // 直接從頁面提取當前對話消息（不從存儲）
-        console.log('[Gemini 分類助手] [消息監聽] ========== 收到直接提取對話記錄請求 ==========');
+        _log.debug('[Gemini 分類助手] [消息監聽] ========== 收到直接提取對話記錄請求 ==========');
         try {
           if (!currentChatId) {
-            console.warn('[Gemini 分類助手] [消息監聽] ⚠️ 沒有當前對話 ID');
+            _log.warn('[Gemini 分類助手] [消息監聽] ⚠️ 沒有當前對話 ID');
             sendResponse({ success: true, messages: [], error: 'No current chat ID' });
             return true;
           }
           
-          console.log('[Gemini 分類助手] [消息監聽] 開始從頁面提取消息...');
+          _log.debug('[Gemini 分類助手] [消息監聽] 開始從頁面提取消息...');
           const messages = scrapeMessages();
-          console.log('[Gemini 分類助手] [消息監聽] 提取完成，共', messages.length, '條消息');
+          _log.debug('[Gemini 分類助手] [消息監聽] 提取完成，共', messages.length, '條消息');
           sendResponse({ success: true, messages: messages, count: messages.length });
           return true;
         } catch (error) {
-          console.error('[Gemini 分類助手] [消息監聽] 提取對話記錄時發生錯誤:', error);
-          console.error('[Gemini 分類助手] [消息監聽] 錯誤堆疊:', error.stack);
+          _log.error('[Gemini 分類助手] [消息監聽] 提取對話記錄時發生錯誤:', error);
+          _log.error('[Gemini 分類助手] [消息監聽] 錯誤堆疊:', error.stack);
           sendResponse({ success: false, error: error.message || String(error) });
           return true;
         }
@@ -1464,7 +1511,7 @@
             chatId: currentChatId,
             userProfile: currentUserProfile || 'default'
           }).catch(err => {
-            console.error('[Gemini 分類助手] [圖片記錄] 記錄失敗:', err);
+            _log.error('[Gemini 分類助手] [圖片記錄] 記錄失敗:', err);
           });
 
           // 【自動追蹤】下載 URL 命中 gg-dl/rd-gg 時，自動追蹤原始圖
@@ -1676,31 +1723,31 @@
 
   async function startMonitoring() {
     if (isMonitoring) {
-      console.log('[Gemini 分類助手] 監測已在運行中');
+      _log.debug('[Gemini 分類助手] 監測已在運行中');
       return;
     }
     
     // 檢查是否暫停監控
     const result = await chrome.storage.local.get(['monitoringPaused']);
     if (result.monitoringPaused === true) {
-      console.log('[Gemini 分類助手] ⏸️ 監控已暫停，不啟動監測');
+      _log.debug('[Gemini 分類助手] ⏸️ 監控已暫停，不啟動監測');
       return;
     }
     
     isMonitoring = true;
-    console.log('[Gemini 分類助手] ✓ 開始監測 Gemini 對話狀態');
-    console.log('[Gemini 分類助手] 當前 URL:', window.location.href);
-    console.log('[Gemini 分類助手] 當前 isMonitoring:', isMonitoring);
+    _log.debug('[Gemini 分類助手] ✓ 開始監測 Gemini 對話狀態');
+    _log.debug('[Gemini 分類助手] 當前 URL:', window.location.href);
+    _log.debug('[Gemini 分類助手] 當前 isMonitoring:', isMonitoring);
 
     // 監聽 URL 變化
     setupURLMonitoring();
 
     // 立即檢查當前 URL（強制檢查，確保對話能被檢測到）
-    console.log('[Gemini 分類助手] 立即檢查當前 URL:', window.location.href);
+    _log.debug('[Gemini 分類助手] 立即檢查當前 URL:', window.location.href);
     checkURLAndExtractConversation(true); // 使用強制檢查
     
     // 開始監控對話內容（即使沒有 currentChatId 也設置）
-    console.log('[Gemini 分類助手] 設置消息監控...');
+    _log.debug('[Gemini 分類助手] 設置消息監控...');
     setupMessageMonitoring();
     
     // 啟動強制提取定時器（每 2 秒掃描一次，不論有沒有對話 ID 都運行）
@@ -1719,14 +1766,14 @@
 
   function stopMonitoring() {
     isMonitoring = false;
-    console.log('[Gemini 分類助手] ✗ 停止監測');
+    _log.debug('[Gemini 分類助手] ✗ 停止監測');
 
     // 統一清理所有觀察器（包括 titleObserver、messageObserver、imageObserver 及所有動態觀察器）
     try {
       observerManager.disconnectAll();
-      console.log('[Gemini 分類助手] [清理] observerManager 已清理所有觀察器');
+      _log.debug('[Gemini 分類助手] [清理] observerManager 已清理所有觀察器');
     } catch (e) {
-      console.log('[Gemini 分類助手] [清理] observerManager 清理時發生錯誤（可忽略）:', e.message);
+      _log.debug('[Gemini 分類助手] [清理] observerManager 清理時發生錯誤（可忽略）:', e.message);
     }
     titleObserver = null;
     messageObserver = null;
@@ -1735,9 +1782,9 @@
     // 統一清理所有定時器（urlCheck、scrapeBackup、forceExtract、recovery 等）
     try {
       timerManager.clearAll();
-      console.log('[Gemini 分類助手] [清理] timerManager 已清理所有定時器');
+      _log.debug('[Gemini 分類助手] [清理] timerManager 已清理所有定時器');
     } catch (e) {
-      console.log('[Gemini 分類助手] [清理] timerManager 清理時發生錯誤（可忽略）:', e.message);
+      _log.debug('[Gemini 分類助手] [清理] timerManager 清理時發生錯誤（可忽略）:', e.message);
     }
 
     // 取消防抖的圖片提取
@@ -1747,34 +1794,34 @@
     if (_originalPushState) {
       history.pushState = _originalPushState;
       _originalPushState = null;
-      console.log('[Gemini 分類助手] [清理] 已恢復 history.pushState');
+      _log.debug('[Gemini 分類助手] [清理] 已恢復 history.pushState');
     }
     if (_originalReplaceState) {
       history.replaceState = _originalReplaceState;
       _originalReplaceState = null;
-      console.log('[Gemini 分類助手] [清理] 已恢復 history.replaceState');
+      _log.debug('[Gemini 分類助手] [清理] 已恢復 history.replaceState');
     }
 
     // 移除 popstate 事件監聽器
     if (_popstateHandler) {
       window.removeEventListener('popstate', _popstateHandler);
       _popstateHandler = null;
-      console.log('[Gemini 分類助手] [清理] 已移除 popstate 監聽器');
+      _log.debug('[Gemini 分類助手] [清理] 已移除 popstate 監聽器');
     }
 
     // 恢復 fetch/XHR 原始方法（全局攔截器）
     if (window._geminiInterceptors) {
       if (window._geminiInterceptors.originalFetch) {
         window.fetch = window._geminiInterceptors.originalFetch;
-        console.log('[Gemini 分類助手] [清理] 已恢復 window.fetch');
+        _log.debug('[Gemini 分類助手] [清理] 已恢復 window.fetch');
       }
       if (window._geminiInterceptors.originalXHROpen) {
         XMLHttpRequest.prototype.open = window._geminiInterceptors.originalXHROpen;
-        console.log('[Gemini 分類助手] [清理] 已恢復 XMLHttpRequest.prototype.open');
+        _log.debug('[Gemini 分類助手] [清理] 已恢復 XMLHttpRequest.prototype.open');
       }
       if (window._geminiInterceptors.originalXHRSend) {
         XMLHttpRequest.prototype.send = window._geminiInterceptors.originalXHRSend;
-        console.log('[Gemini 分類助手] [清理] 已恢復 XMLHttpRequest.prototype.send');
+        _log.debug('[Gemini 分類助手] [清理] 已恢復 XMLHttpRequest.prototype.send');
       }
       window._geminiInterceptors = null;
     }
@@ -1782,9 +1829,9 @@
     // 統一清理所有事件監聽器
     try {
       eventManager.cleanup();
-      console.log('[Gemini 分類助手] [清理] eventManager 已清理所有事件監聽器');
+      _log.debug('[Gemini 分類助手] [清理] eventManager 已清理所有事件監聽器');
     } catch (e) {
-      console.log('[Gemini 分類助手] [清理] eventManager 清理時發生錯誤（可忽略）:', e.message);
+      _log.debug('[Gemini 分類助手] [清理] eventManager 清理時發生錯誤（可忽略）:', e.message);
     }
 
     // 重置狀態（但保留 currentChatId 和 currentTitle，以便重新啟動時使用）
@@ -1798,11 +1845,11 @@
 
   // 設置 URL 監聽
   function setupURLMonitoring() {
-    console.log('[Gemini 分類助手] 設置 URL 監聽...');
+    _log.debug('[Gemini 分類助手] 設置 URL 監聽...');
 
     // 監聽 popstate 事件（瀏覽器前進/後退）- 使用具名函數以便清理
     _popstateHandler = () => {
-      console.log('[Gemini 分類助手] popstate 事件觸發');
+      _log.debug('[Gemini 分類助手] popstate 事件觸發');
       setTimeout(() => {
         checkURLAndExtractConversation();
       }, 300);
@@ -1816,7 +1863,7 @@
 
     history.pushState = function(...args) {
       _originalPushState.apply(history, args);
-      console.log('[Gemini 分類助手] pushState 觸發，新 URL:', window.location.href);
+      _log.debug('[Gemini 分類助手] pushState 觸發，新 URL:', window.location.href);
       setTimeout(() => {
         checkURLAndExtractConversation();
       }, 300);
@@ -1824,7 +1871,7 @@
 
     history.replaceState = function(...args) {
       _originalReplaceState.apply(history, args);
-      console.log('[Gemini 分類助手] replaceState 觸發，新 URL:', window.location.href);
+      _log.debug('[Gemini 分類助手] replaceState 觸發，新 URL:', window.location.href);
       setTimeout(() => {
         checkURLAndExtractConversation();
       }, 300);
@@ -1835,7 +1882,7 @@
       checkURLAndExtractConversation();
     }, 3000);
 
-    console.log('[Gemini 分類助手] ✓ URL 監聽已設置完成');
+    _log.debug('[Gemini 分類助手] ✓ URL 監聽已設置完成');
   }
 
   // 用於追蹤 URL 檢查次數（定期檢測用戶檔案）
@@ -1850,7 +1897,7 @@
     try {
       urlCheckCount++;
       const url = window.location.href;
-      // console.log('[Gemini 分類助手] [URL檢查] 當前 URL:', url, '(檢查次數:', urlCheckCount, ')'); // 已關閉日誌
+      // _log.debug('[Gemini 分類助手] [URL檢查] 當前 URL:', url, '(檢查次數:', urlCheckCount, ')'); // 已關閉日誌
 
       // 檢查是否在支援的站點上（透過 adapter）
       const __registry = window.__GAPI_SiteRegistry;
@@ -1858,7 +1905,7 @@
       const isOnSupportedSite = __adapter ? __adapter.isOnSite(url) : url.includes('gemini.google.com');
       if (!isOnSupportedSite) {
         if (currentChatId !== null) {
-          // console.log('[Gemini 分類助手] [URL檢查] 清除當前對話信息'); // 已關閉日誌
+          // _log.debug('[Gemini 分類助手] [URL檢查] 清除當前對話信息'); // 已關閉日誌
           currentChatId = null;
           currentTitle = null;
           // 停止強制提取定時器
@@ -1879,17 +1926,17 @@
       }
 
       if (chatId) {
-        console.log('[Gemini 分類助手] [URL檢查] ✓ 從 URL 找到對話 ID:', chatId);
+        _log.debug('[Gemini 分類助手] [URL檢查] ✓ 從 URL 找到對話 ID:', chatId);
       } else if (url.includes(__appPath)) {
         // 如果在對話頁面但沒有 chatId，嘗試從 DOM 或其他方式檢測
-        console.log('[Gemini 分類助手] [URL檢查] ⚠️ 在對話頁面但 URL 中沒有 chatId，嘗試從 DOM 檢測...');
+        _log.debug('[Gemini 分類助手] [URL檢查] ⚠️ 在對話頁面但 URL 中沒有 chatId，嘗試從 DOM 檢測...');
 
         try {
           // 方法 2: 透過 adapter 從 pathname 再次嘗試
           if (!chatId && __adapter && typeof __adapter.getChatIdFromUrl === 'function') {
             chatId = __adapter.getChatIdFromUrl(window.location.pathname);
             if (chatId) {
-              console.log('[Gemini 分類助手] [URL檢查] ✓ 從 pathname 找到對話 ID:', chatId);
+              _log.debug('[Gemini 分類助手] [URL檢查] ✓ 從 pathname 找到對話 ID:', chatId);
             }
           }
 
@@ -1897,7 +1944,7 @@
           if (!chatId && __adapter && typeof __adapter.chatIdFromDOM === 'function') {
             chatId = __adapter.chatIdFromDOM();
             if (chatId) {
-              console.log('[Gemini 分類助手] [URL檢查] ✓ 從 DOM 元素找到對話 ID:', chatId);
+              _log.debug('[Gemini 分類助手] [URL檢查] ✓ 從 DOM 元素找到對話 ID:', chatId);
             }
           }
 
@@ -1907,12 +1954,12 @@
             const hasMessages = document.querySelectorAll(__msgSelector).length > 0;
             if (hasMessages) {
               const tempId = 'temp_' + Date.now();
-              console.log('[Gemini 分類助手] [URL檢查] ⚠️ 使用臨時對話 ID:', tempId, '(頁面上有對話內容但 URL 中沒有 ID)');
+              _log.debug('[Gemini 分類助手] [URL檢查] ⚠️ 使用臨時對話 ID:', tempId, '(頁面上有對話內容但 URL 中沒有 ID)');
               chatId = tempId;
             }
           }
         } catch (error) {
-          console.error('[Gemini 分類助手] [URL檢查] 從 DOM 檢測對話 ID 時發生錯誤:', error);
+          _log.error('[Gemini 分類助手] [URL檢查] 從 DOM 檢測對話 ID 時發生錯誤:', error);
         }
       }
       
@@ -1920,20 +1967,20 @@
         
         // 如果 chatId 改變了，先檢測用戶檔案，然後更新並嘗試獲取標題
         if (chatId !== currentChatId) {
-          // console.log('[Gemini 分類助手] [URL檢查] ✨ 檢測到新的對話 ID:', chatId, '(舊 ID:', currentChatId, ')'); // 已關閉日誌
+          // _log.debug('[Gemini 分類助手] [URL檢查] ✨ 檢測到新的對話 ID:', chatId, '(舊 ID:', currentChatId, ')'); // 已關閉日誌
           
           // 【優化】切換對話時清理資源
           cleanupOnConversationSwitch();
           
           // 重要：先檢測用戶檔案（頁面切換時優先確認用戶是誰）
-          // console.log('[Gemini 分類助手] [URL檢查] 🔍 開始檢測用戶檔案（頁面切換）...'); // 已關閉日誌
+          // _log.debug('[Gemini 分類助手] [URL檢查] 🔍 開始檢測用戶檔案（頁面切換）...'); // 已關閉日誌
           try {
             detectUserProfile();
           } catch (error) {
-            console.error('[Gemini 分類助手] [URL檢查] 檢測用戶檔案時發生錯誤:', error);
+            _log.error('[Gemini 分類助手] [URL檢查] 檢測用戶檔案時發生錯誤:', error);
             currentUserProfile = currentUserProfile || 'default';
           }
-          // console.log('[Gemini 分類助手] [URL檢查] ✓ 當前用戶檔案:', currentUserProfile || 'default'); // 已關閉日誌
+          // _log.debug('[Gemini 分類助手] [URL檢查] ✓ 當前用戶檔案:', currentUserProfile || 'default'); // 已關閉日誌
           
           currentChatId = chatId;
           currentTitle = null; // 重置標題，等待重新獲取
@@ -1951,14 +1998,14 @@
           setupMessageMonitoring(); // 這會自動調用 setupImageMonitoring()
           
           // 立即執行一次圖片提取（查找頁面上已存在的圖片）
-          console.log('[Gemini 分類助手] [圖片追蹤] 🔍 開始追蹤圖片（新對話）...');
+          _log.debug('[Gemini 分類助手] [圖片追蹤] 🔍 開始追蹤圖片（新對話）...');
           setTimeout(() => {
             extractGeneratedImages();
           }, 1000);
             
             // 等待一小段時間後再提取（給頁面時間渲染）
             setTimeout(() => {
-              console.log('[Gemini 分類助手] [標題提取] 開始提取新對話的標題（500ms 後）...');
+              _log.debug('[Gemini 分類助手] [標題提取] 開始提取新對話的標題（500ms 後）...');
               extractionAttempts = 0; // 重置計數
               extractTitle();
               // 同時提取圖片
@@ -1969,13 +2016,13 @@
             setTimeout(() => {
               const genericTitles = ['對話', 'Conversation', '和 Gemini 的對話', 'Google Gemini'];
               if (!currentTitle || genericTitles.includes(currentTitle)) {
-                console.log('[Gemini 分類助手] [標題提取] 再次嘗試提取標題（2s 後，動態內容可能已加載）...');
+                _log.debug('[Gemini 分類助手] [標題提取] 再次嘗試提取標題（2s 後，動態內容可能已加載）...');
                 extractionAttempts = 0; // 重置計數
                 // 再次檢測用戶檔案（以防頁面完全加載後才顯示）
                 try {
                   detectUserProfile();
                 } catch (error) {
-                  console.error('[Gemini 分類助手] [標題提取] 檢測用戶檔案時發生錯誤:', error);
+                  _log.error('[Gemini 分類助手] [標題提取] 檢測用戶檔案時發生錯誤:', error);
                 }
                 extractTitle();
               }
@@ -1985,13 +2032,13 @@
             setTimeout(() => {
               const genericTitles = ['對話', 'Conversation', '和 Gemini 的對話', 'Google Gemini'];
               if (!currentTitle || genericTitles.includes(currentTitle)) {
-                console.log('[Gemini 分類助手] [標題提取] 第三次嘗試提取標題（5s 後，側邊欄應已完全加載）...');
+                _log.debug('[Gemini 分類助手] [標題提取] 第三次嘗試提取標題（5s 後，側邊欄應已完全加載）...');
                 extractionAttempts = 0; // 重置計數
                 // 再次檢測用戶檔案（確保是最新的）
                 try {
                   detectUserProfile();
                 } catch (error) {
-                  console.error('[Gemini 分類助手] [標題提取] 檢測用戶檔案時發生錯誤:', error);
+                  _log.error('[Gemini 分類助手] [標題提取] 檢測用戶檔案時發生錯誤:', error);
                 }
                 extractTitle();
               }
@@ -2000,22 +2047,22 @@
           // 同一個對話，但可能需要更新標題和用戶檔案
           // 定期重新檢測用戶檔案（以防頁面切換但 URL 沒變）
           if (!currentTitle) {
-            console.log('[Gemini 分類助手] [標題提取] 同一個對話但標題為空，嘗試重新提取...');
+            _log.debug('[Gemini 分類助手] [標題提取] 同一個對話但標題為空，嘗試重新提取...');
             // 先檢測用戶檔案
             try {
               detectUserProfile();
             } catch (error) {
-              console.error('[Gemini 分類助手] [URL檢查] 檢測用戶檔案時發生錯誤:', error);
+              _log.error('[Gemini 分類助手] [URL檢查] 檢測用戶檔案時發生錯誤:', error);
             }
             extractTitle();
           } else {
             // 即使有標題，也定期檢測用戶檔案（每 10 次 URL 檢查檢測一次）
             if (urlCheckCount % 10 === 0) {
-              // console.log('[Gemini 分類助手] [URL檢查] 定期檢測用戶檔案...'); // 已關閉日誌
+              // _log.debug('[Gemini 分類助手] [URL檢查] 定期檢測用戶檔案...'); // 已關閉日誌
               try {
                 detectUserProfile();
               } catch (error) {
-                console.error('[Gemini 分類助手] [URL檢查] 檢測用戶檔案時發生錯誤:', error);
+                _log.error('[Gemini 分類助手] [URL檢查] 檢測用戶檔案時發生錯誤:', error);
                 // 不影響其他功能，繼續執行
               }
             }
@@ -2023,13 +2070,13 @@
           
           // 確保消息監控正在運行（同一個對話時也應該持續監聽新消息）
           if (!messageObserver) {
-            console.log('[Gemini 分類助手] [消息監測] 同一個對話但消息監控未運行，重新設置...');
+            _log.debug('[Gemini 分類助手] [消息監測] 同一個對話但消息監控未運行，重新設置...');
             setupMessageMonitoring();
           }
           
           // 定期觸發一次消息提取（每 5 次 URL 檢查提取一次，確保新消息能被捕獲）
           if (urlCheckCount % 5 === 0) {
-            console.log('[Gemini 分類助手] [對話提取] 定期提取消息（同一個對話）...');
+            _log.debug('[Gemini 分類助手] [對話提取] 定期提取消息（同一個對話）...');
             setTimeout(() => {
               if (isRuntimeValid() && currentChatId === chatId) {
                 scrapeMessages();
@@ -2039,9 +2086,9 @@
         }
       } else {
         // URL 中沒有對話 ID，可能是在主頁面
-        // console.log('[Gemini 分類助手] [URL檢查] ⚠️ URL 中沒有找到對話 ID 模式'); // 已關閉日誌
+        // _log.debug('[Gemini 分類助手] [URL檢查] ⚠️ URL 中沒有找到對話 ID 模式'); // 已關閉日誌
         if (currentChatId !== null) {
-          // console.log('[Gemini 分類助手] [URL檢查] 離開對話頁面，清除當前對話'); // 已關閉日誌
+          // _log.debug('[Gemini 分類助手] [URL檢查] 離開對話頁面，清除當前對話'); // 已關閉日誌
           currentChatId = null;
           currentTitle = null;
           // 停止強制提取定時器
@@ -2058,40 +2105,40 @@
         }
       }
     } catch (error) {
-      console.error('[Gemini 分類助手] [URL檢查] ❌ 檢查 URL 時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [URL檢查] ❌ 檢查 URL 時發生錯誤:', error);
     }
   }
 
   // 設置標題監測（使用 MutationObserver）
   function setupTitleMonitoring() {
     if (!currentChatId) {
-      console.log('[Gemini 分類助手] [MutationObserver] 跳過設置，因為沒有當前對話 ID');
+      _log.debug('[Gemini 分類助手] [MutationObserver] 跳過設置，因為沒有當前對話 ID');
       return;
     }
 
     // observerManager.create 會自動斷開同名舊觀察器
     if (!document.body) {
-      console.error('[Gemini 分類助手] [MutationObserver] ❌ document.body 不存在，無法設置觀察器');
+      _log.error('[Gemini 分類助手] [MutationObserver] ❌ document.body 不存在，無法設置觀察器');
       return;
     }
 
     titleObserver = observerManager.create('titleObserver', document.body, (mutations) => {
       if (!isRuntimeValid()) {
-        console.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
+        _log.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
         observerManager.disconnect('titleObserver');
         titleObserver = null;
         return;
       }
 
       if (!currentTitle && extractionAttempts < MAX_EXTRACTION_ATTEMPTS) {
-        console.log('[Gemini 分類助手] [MutationObserver] DOM 變化檢測到，嘗試提取標題 (嘗試次數:', extractionAttempts + 1, ')');
+        _log.debug('[Gemini 分類助手] [MutationObserver] DOM 變化檢測到，嘗試提取標題 (嘗試次數:', extractionAttempts + 1, ')');
         try {
           extractTitle();
         } catch (error) {
           const errorMessage = error.message || error.toString();
           if (errorMessage.includes('Extension context invalidated') ||
               errorMessage.includes('message port closed')) {
-            console.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
+            _log.warn('[Gemini 分類助手] [MutationObserver] ⚠️ 擴展上下文已失效，停止觀察');
             observerManager.disconnect('titleObserver');
             titleObserver = null;
           }
@@ -2104,13 +2151,13 @@
       attributes: true,
       attributeFilter: ['class', 'data-testid', 'aria-label']
     });
-    console.log('[Gemini 分類助手] [MutationObserver] ✓ MutationObserver 已設置，觀察 document.body');
+    _log.debug('[Gemini 分類助手] [MutationObserver] ✓ MutationObserver 已設置，觀察 document.body');
   }
 
   // 提取對話標題
   function extractTitle() {
     if (!currentChatId) {
-      console.log('[Gemini 分類助手] [標題提取] 跳過提取，因為沒有當前對話 ID');
+      _log.debug('[Gemini 分類助手] [標題提取] 跳過提取，因為沒有當前對話 ID');
       return;
     }
 
@@ -2129,19 +2176,19 @@
       const __registry = window.__GAPI_SiteRegistry;
       const __adapter = __registry ? __registry.getCurrentAdapter() : null;
 
-      console.log('[Gemini 分類助手] [標題提取] ========== 開始提取標題 (嘗試 #' + extractionAttempts + ') ==========');
-      console.log('[Gemini 分類助手] [標題提取] 當前 URL:', window.location.href);
-      console.log('[Gemini 分類助手] [標題提取] 當前 ChatId:', currentChatId);
+      _log.debug('[Gemini 分類助手] [標題提取] ========== 開始提取標題 (嘗試 #' + extractionAttempts + ') ==========');
+      _log.debug('[Gemini 分類助手] [標題提取] 當前 URL:', window.location.href);
+      _log.debug('[Gemini 分類助手] [標題提取] 當前 ChatId:', currentChatId);
 
       // 調試：輸出頁面結構信息
       if (extractionAttempts === 1) {
         const __debugLinkSelector = __adapter ? __adapter.sidebarLinkSelector('') : 'a[href]';
-        console.log('[Gemini 分類助手] [標題提取] [調試] 頁面結構分析:');
-        console.log('[Gemini 分類助手] [標題提取] [調試] - document.title:', document.title);
-        console.log('[Gemini 分類助手] [標題提取] [調試] - h1 數量:', document.querySelectorAll('h1').length);
-        console.log('[Gemini 分類助手] [標題提取] [調試] - 所有 h1 文本:', Array.from(document.querySelectorAll('h1')).map(h => h.innerText || h.textContent).filter(t => t.trim()));
-        console.log('[Gemini 分類助手] [標題提取] [調試] - 對話鏈接數量:', document.querySelectorAll(__debugLinkSelector).length);
-        console.log('[Gemini 分類助手] [標題提取] [調試] - 前 5 個對話鏈接:', Array.from(document.querySelectorAll(__debugLinkSelector)).slice(0, 5).map(a => ({
+        _log.debug('[Gemini 分類助手] [標題提取] [調試] 頁面結構分析:');
+        _log.debug('[Gemini 分類助手] [標題提取] [調試] - document.title:', document.title);
+        _log.debug('[Gemini 分類助手] [標題提取] [調試] - h1 數量:', document.querySelectorAll('h1').length);
+        _log.debug('[Gemini 分類助手] [標題提取] [調試] - 所有 h1 文本:', Array.from(document.querySelectorAll('h1')).map(h => h.innerText || h.textContent).filter(t => t.trim()));
+        _log.debug('[Gemini 分類助手] [標題提取] [調試] - 對話鏈接數量:', document.querySelectorAll(__debugLinkSelector).length);
+        _log.debug('[Gemini 分類助手] [標題提取] [調試] - 前 5 個對話鏈接:', Array.from(document.querySelectorAll(__debugLinkSelector)).slice(0, 5).map(a => ({
           href: a.href,
           text: (a.innerText || a.textContent || '').trim().substring(0, 50),
           ariaLabel: a.getAttribute('aria-label') || ''
@@ -2149,10 +2196,10 @@
       }
 
       // 策略 0: 優先從側邊欄對話列表區域查找（最可靠，因為側邊欄通常有真實的對話標題）
-      console.log('[Gemini 分類助手] [標題提取] 策略 0: 優先從側邊欄對話列表區域查找當前對話標題...');
+      _log.debug('[Gemini 分類助手] [標題提取] 策略 0: 優先從側邊欄對話列表區域查找當前對話標題...');
       try {
         // 策略 0.0: 首先查找側邊欄中當前選中/激活的對話項（最準確）
-        console.log('[Gemini 分類助手] [標題提取] 策略 0.0: 查找側邊欄中當前選中的對話項...');
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 0.0: 查找側邊欄中當前選中的對話項...');
         const selectedSelectors = (__adapter && typeof __adapter.selectedItemSelectors === 'function')
           ? __adapter.selectedItemSelectors(currentChatId)
           : [];
@@ -2161,7 +2208,7 @@
           try {
             const selectedLink = document.querySelector(selector);
             if (selectedLink) {
-              console.log('[Gemini 分類助手] [標題提取] 策略 0.0: 找到選中的對話鏈接');
+              _log.debug('[Gemini 分類助手] [標題提取] 策略 0.0: 找到選中的對話鏈接');
               const clonedLink = selectedLink.cloneNode(true);
               const children = clonedLink.children;
               for (let i = children.length - 1; i >= 0; i--) {
@@ -2181,7 +2228,7 @@
               if (textTrimmed && textTrimmed.length >= 2 && textTrimmed.length <= 300) {
                 title = textTrimmed;
                 foundBy = 'sidebar-selected-item (strategy 0.0)';
-                console.log('[Gemini 分類助手] [標題提取] ✓ 策略 0.0 成功: 從選中項找到標題:', title);
+                _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 0.0 成功: 從選中項找到標題:', title);
                 break;
               }
             }
@@ -2193,12 +2240,12 @@
         
         // 策略 0.1: 精確查找包含當前 chatId 的鏈接
         if (!title) {
-          console.log('[Gemini 分類助手] [標題提取] 策略 0.1: 精確查找包含 chatId 的鏈接 (chatId: ' + currentChatId + ')...');
+          _log.debug('[Gemini 分類助手] [標題提取] 策略 0.1: 精確查找包含 chatId 的鏈接 (chatId: ' + currentChatId + ')...');
           const exactLinkSelector = (__adapter && typeof __adapter.sidebarLinkSelector === 'function')
             ? __adapter.sidebarLinkSelector(currentChatId)
             : 'a[href*="' + currentChatId + '"]';
           const exactLinks = document.querySelectorAll(exactLinkSelector);
-          console.log('[Gemini 分類助手] [標題提取] 找到', exactLinks.length, '個精確匹配的鏈接');
+          _log.debug('[Gemini 分類助手] [標題提取] 找到', exactLinks.length, '個精確匹配的鏈接');
           
           // 構建排除清單（來自 adapter）
           const __genericPatterns = (__adapter && __adapter.genericTitlePatterns) || [];
@@ -2235,7 +2282,7 @@
             }
           }
 
-          console.log('[Gemini 分類助手] [標題提取] 鏈接文本候選:', text.trim().substring(0, 100));
+          _log.debug('[Gemini 分類助手] [標題提取] 鏈接文本候選:', text.trim().substring(0, 100));
 
           const textTrimmed = text.trim();
 
@@ -2246,7 +2293,7 @@
 
           // 額外檢查：如果文本是導航模式文本，明確排除
           if (__navPatterns.includes(textTrimmed)) {
-            console.log('[Gemini 分類助手] [標題提取] 鏈接文本是導航菜單項或通用文本，明確排除:', textTrimmed);
+            _log.debug('[Gemini 分類助手] [標題提取] 鏈接文本是導航菜單項或通用文本，明確排除:', textTrimmed);
             continue;
           }
           
@@ -2257,22 +2304,22 @@
             // 如果在對話列表區域，即使看起來像通用文本也接受（因為這就是實際顯示的標題）
             title = textTrimmed;
             foundBy = 'sidebar-exact-link (strategy 0.1)';
-            console.log('[Gemini 分類助手] [標題提取] ✓ 策略 0.1 成功: 從精確鏈接找到標題:', title);
+            _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 0.1 成功: 從精確鏈接找到標題:', title);
             break;
           } else if (!isNavigationText && textTrimmed.length >= 5) {
             title = textTrimmed;
             foundBy = 'sidebar-exact-link (strategy 0.1)';
-            console.log('[Gemini 分類助手] [標題提取] ✓ 策略 0.1 成功: 從精確鏈接找到標題:', title);
+            _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 0.1 成功: 從精確鏈接找到標題:', title);
             break;
           } else {
-            console.log('[Gemini 分類助手] [標題提取] 鏈接文本被排除:', textTrimmed, '(isNavigation:', isNavigationText, ', length:', textTrimmed.length, ')');
+            _log.debug('[Gemini 分類助手] [標題提取] 鏈接文本被排除:', textTrimmed, '(isNavigation:', isNavigationText, ', length:', textTrimmed.length, ')');
             }
           }
         }
         
         // 如果精確查找沒找到，嘗試從對話列表區域查找
         if (!title) {
-          console.log('[Gemini 分類助手] [標題提取] 策略 0.2: 從對話列表區域查找...');
+          _log.debug('[Gemini 分類助手] [標題提取] 策略 0.2: 從對話列表區域查找...');
           
           // 查找對話列表區域的鏈接（透過 adapter 取得 selector）
           const conversationListSelectors = (__adapter && __adapter.sidebarContainerSelectors)
@@ -2283,12 +2330,12 @@
           for (const selector of conversationListSelectors) {
             try {
               const links = document.querySelectorAll(selector);
-              console.log('[Gemini 分類助手] [標題提取] 策略 0.1 選擇器', selector, '找到', links.length, '個鏈接');
+              _log.debug('[Gemini 分類助手] [標題提取] 策略 0.1 選擇器', selector, '找到', links.length, '個鏈接');
               
               for (const link of links) {
                 const href = link.getAttribute('href') || '';
                 if (href.includes(currentChatId)) {
-                  console.log('[Gemini 分類助手] [標題提取] 在對話列表區域找到匹配鏈接:', href);
+                  _log.debug('[Gemini 分類助手] [標題提取] 在對話列表區域找到匹配鏈接:', href);
                   
                   // 獲取鏈接的直接文本
                   const clonedLink = link.cloneNode(true);
@@ -2314,7 +2361,7 @@
                   if (!isNavigationText && textTrimmed.length >= 2 && textTrimmed.length <= 300) {
                     title = textTrimmed;
                     foundBy = 'sidebar-list-area (strategy 0.2)';
-                    console.log('[Gemini 分類助手] [標題提取] ✓ 策略 0.2 成功: 從對話列表區域找到標題:', title);
+                    _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 0.2 成功: 從對話列表區域找到標題:', title);
                     foundInListArea = true;
                     break;
                   }
@@ -2322,7 +2369,7 @@
               }
               if (foundInListArea) break;
             } catch (e) {
-              console.log('[Gemini 分類助手] [標題提取] 策略 0.1 選擇器', selector, '查詢出錯:', e.message);
+              _log.debug('[Gemini 分類助手] [標題提取] 策略 0.1 選擇器', selector, '查詢出錯:', e.message);
             }
           }
         }
@@ -2332,14 +2379,14 @@
           const __allLinksSelector = (__adapter && typeof __adapter.sidebarLinkSelector === 'function')
             ? __adapter.sidebarLinkSelector('')
             : 'a[href]';
-          console.log('[Gemini 分類助手] [標題提取] 策略 0.3: 查找所有對話鏈接（嚴格過濾）...');
+          _log.debug('[Gemini 分類助手] [標題提取] 策略 0.3: 查找所有對話鏈接（嚴格過濾）...');
           const allAppLinks = document.querySelectorAll(__allLinksSelector);
-          console.log('[Gemini 分類助手] [標題提取] 找到', allAppLinks.length, '個對話鏈接');
+          _log.debug('[Gemini 分類助手] [標題提取] 找到', allAppLinks.length, '個對話鏈接');
           
           for (const link of allAppLinks) {
             const href = link.getAttribute('href') || '';
             if (href.includes(currentChatId)) {
-              console.log('[Gemini 分類助手] [標題提取] 找到匹配的鏈接:', href);
+              _log.debug('[Gemini 分類助手] [標題提取] 找到匹配的鏈接:', href);
               
               // 獲取鏈接的直接文本（不包含子元素）
               const clonedLink = link.cloneNode(true);
@@ -2357,7 +2404,7 @@
                   const parentText = listItem.closest('nav, [role="navigation"], [class*="sidebar"], [class*="nav"]')?.innerText || '';
                   if (__navPatterns.some(p => parentText.includes(p))) {
                     // 跳過導航菜單區域
-                    console.log('[Gemini 分類助手] [標題提取] 跳過導航菜單區域的鏈接');
+                    _log.debug('[Gemini 分類助手] [標題提取] 跳過導航菜單區域的鏈接');
                     continue;
                   }
                   
@@ -2376,22 +2423,22 @@
               if (!isNavigationText && textTrimmed.length >= 5 && textTrimmed.length <= 300) {
                 title = textTrimmed;
                 foundBy = 'sidebar-strict-filter (strategy 0.3)';
-                console.log('[Gemini 分類助手] [標題提取] ✓ 策略 0.3 成功: 從嚴格過濾鏈接找到標題:', title);
+                _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 0.3 成功: 從嚴格過濾鏈接找到標題:', title);
                 break;
               } else {
-                console.log('[Gemini 分類助手] [標題提取] 鏈接文本被排除:', textTrimmed);
+                _log.debug('[Gemini 分類助手] [標題提取] 鏈接文本被排除:', textTrimmed);
               }
             }
           }
         }
       } catch (e) {
-        console.log('[Gemini 分類助手] [標題提取] 策略 0 執行出錯:', e.message);
-        console.error(e);
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 0 執行出錯:', e.message);
+        _log.error(e);
       }
 
       // 策略 1: 查找頁面頂部區域的對話標題（作為備選）
       if (!title) {
-        console.log('[Gemini 分類助手] [標題提取] 策略 1: 查找頁面頂部區域的對話標題...');
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 1: 查找頁面頂部區域的對話標題...');
         
         // 先查找主聊天區域的標題容器
         const mainContentSelectors = [
@@ -2411,7 +2458,7 @@
             const element = document.querySelector(selector);
             if (element) {
               const text = element.innerText || element.textContent || '';
-              console.log('[Gemini 分類助手] [標題提取] 策略 1 候選:', selector, '=', text.trim().substring(0, 50));
+              _log.debug('[Gemini 分類助手] [標題提取] 策略 1 候選:', selector, '=', text.trim().substring(0, 50));
               
               if (text.trim() && text.trim().length > 2) {
                 const shouldExclude = __excludedRegex && __excludedRegex.test(text.trim());
@@ -2419,7 +2466,7 @@
                 if (!shouldExclude && text.trim().length > 2 && text.trim().length < 200) {
                   title = text.trim();
                   foundBy = 'main-content-h1 (' + selector + ')';
-                  console.log('[Gemini 分類助手] [標題提取] ✓ 策略 1 成功: 從', selector, '找到標題:', title);
+                  _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 1 成功: 從', selector, '找到標題:', title);
                   break;
                 }
               }
@@ -2431,13 +2478,13 @@
 
         // 如果策略 1 沒找到，嘗試查找所有 h1（作為備選）
         if (!title) {
-          console.log('[Gemini 分類助手] [標題提取] 策略 1.1: 查找所有 h1 標籤...');
+          _log.debug('[Gemini 分類助手] [標題提取] 策略 1.1: 查找所有 h1 標籤...');
           const h1Elements = document.querySelectorAll('h1');
-          console.log('[Gemini 分類助手] [標題提取] 找到', h1Elements.length, '個 h1 標籤');
+          _log.debug('[Gemini 分類助手] [標題提取] 找到', h1Elements.length, '個 h1 標籤');
 
           for (const h1 of h1Elements) {
             const text = h1.innerText || h1.textContent || '';
-            console.log('[Gemini 分類助手] [標題提取] h1 內容:', text.trim().substring(0, 50));
+            _log.debug('[Gemini 分類助手] [標題提取] h1 內容:', text.trim().substring(0, 50));
 
             if (text.trim() && text.trim().length > 2) {
               const shouldExclude = __excludedRegex && __excludedRegex.test(text.trim());
@@ -2445,10 +2492,10 @@
               if (!shouldExclude && text.trim().length < 200) {
                 title = text.trim();
                 foundBy = 'h1-fallback';
-                console.log('[Gemini 分類助手] [標題提取] ✓ 策略 1.1 成功: 從 h1 找到標題:', title);
+                _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 1.1 成功: 從 h1 找到標題:', title);
                 break;
               } else {
-                console.log('[Gemini 分類助手] [標題提取] h1 內容被排除:', text.trim());
+                _log.debug('[Gemini 分類助手] [標題提取] h1 內容被排除:', text.trim());
               }
             }
           }
@@ -2457,10 +2504,10 @@
 
       // 策略 2: 查找 role="main" 區域內的標題
       if (!title) {
-        console.log('[Gemini 分類助手] [標題提取] 策略 2: 查找 role="main" 區域...');
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 2: 查找 role="main" 區域...');
         const mainElement = document.querySelector('[role="main"]');
         if (mainElement) {
-          console.log('[Gemini 分類助手] [標題提取] ✓ 找到 role="main" 元素');
+          _log.debug('[Gemini 分類助手] [標題提取] ✓ 找到 role="main" 元素');
           
           // 在 main 區域內查找 h1 或具有特定類名的元素
           const mainH1 = mainElement.querySelector('h1');
@@ -2469,7 +2516,7 @@
             if (text.trim() && text.trim().length > 2 && !(__excludedRegex && __excludedRegex.test(text.trim()))) {
               title = text.trim();
               foundBy = 'role=main > h1';
-              console.log('[Gemini 分類助手] [標題提取] ✓ 策略 2 成功: 從 role="main" > h1 找到標題:', title);
+              _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 2 成功: 從 role="main" > h1 找到標題:', title);
             }
           }
 
@@ -2492,20 +2539,20 @@
                 if (text.trim() && text.trim().length > 2 && !text.trim().match(/^(Gemini|Chat)$/i)) {
                   title = text.trim();
                   foundBy = 'role=main > ' + selector;
-                  console.log('[Gemini 分類助手] [標題提取] ✓ 策略 2 成功: 從', foundBy, '找到標題:', title);
+                  _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 2 成功: 從', foundBy, '找到標題:', title);
                   break;
                 }
               }
             }
           }
         } else {
-          console.log('[Gemini 分類助手] [標題提取] ⚠️ 未找到 role="main" 元素');
+          _log.debug('[Gemini 分類助手] [標題提取] ⚠️ 未找到 role="main" 元素');
         }
       }
 
       // 策略 3: 查找特定的標題選擇器（擴展搜索，但只匹配當前對話的標題）
       if (!title) {
-        console.log('[Gemini 分類助手] [標題提取] 策略 3: 使用擴展選擇器搜索（只匹配當前對話）...');
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 3: 使用擴展選擇器搜索（只匹配當前對話）...');
         const titleSelectors = [
           '[data-title]',
           '[aria-label*="title"]',
@@ -2531,7 +2578,7 @@
           try {
             // 查找所有匹配的元素，而不是只找第一個
             const elements = document.querySelectorAll(selector);
-            console.log('[Gemini 分類助手] [標題提取] 選擇器', selector, '找到', elements.length, '個元素');
+            _log.debug('[Gemini 分類助手] [標題提取] 選擇器', selector, '找到', elements.length, '個元素');
             
             for (const element of elements) {
               // 關鍵：驗證元素是否屬於當前對話
@@ -2557,7 +2604,7 @@
                 // 如果包含導航菜單關鍵詞且不在對話列表中，跳過
                 if (__navPatterns.some(p => navText.includes(p)) &&
                     !element.closest('[class*="conversation"], [class*="chat"], [class*="thread"], [role="list"]')) {
-                  console.log('[Gemini 分類助手] [標題提取] 選擇器', selector, '在導航菜單區域，跳過');
+                  _log.debug('[Gemini 分類助手] [標題提取] 選擇器', selector, '在導航菜單區域，跳過');
                   continue;
                 }
               }
@@ -2572,7 +2619,7 @@
                 continue;
               }
               
-              console.log('[Gemini 分類助手] [標題提取] 選擇器', selector, '找到內容:', textTrimmed.substring(0, 50), '(屬於當前對話:', !!elementContainer, ', 在主內容區:', isInMainContent, ')');
+              _log.debug('[Gemini 分類助手] [標題提取] 選擇器', selector, '找到內容:', textTrimmed.substring(0, 50), '(屬於當前對話:', !!elementContainer, ', 在主內容區:', isInMainContent, ')');
               
               const isNavigationText = __excludedRegex && __excludedRegex.test(textTrimmed);
               
@@ -2586,34 +2633,34 @@
                   } else {
                     foundBy = selector + ' (main content area, strategy 3)';
                   }
-                  console.log('[Gemini 分類助手] [標題提取] ✓ 策略 3 成功: 從', selector, '找到標題 (主內容區):', title);
+                  _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 3 成功: 從', selector, '找到標題 (主內容區):', title);
                   break;
                 } else if (isNavigationText) {
-                  console.log('[Gemini 分類助手] [標題提取] 跳過導航文本:', textTrimmed);
+                  _log.debug('[Gemini 分類助手] [標題提取] 跳過導航文本:', textTrimmed);
                 }
               } else if (!isNavigationText && textTrimmed.length >= 5) {
                 // 如果不在主內容區，要求更長（5個字符以上）作為備選
                 title = textTrimmed;
                 foundBy = selector + ' (fallback)';
-                console.log('[Gemini 分類助手] [標題提取] ✓ 策略 3 備選: 從', selector, '找到標題:', title);
+                _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 3 備選: 從', selector, '找到標題:', title);
                 break;
               } else {
-                console.log('[Gemini 分類助手] [標題提取] 選擇器', selector, '找到的文本被排除:', textTrimmed, '(isNavigation:', isNavigationText, ', length:', textTrimmed.length, ')');
+                _log.debug('[Gemini 分類助手] [標題提取] 選擇器', selector, '找到的文本被排除:', textTrimmed, '(isNavigation:', isNavigationText, ', length:', textTrimmed.length, ')');
               }
             }
             
             if (title) break;
           } catch (e) {
             // 某些選擇器可能會出錯，繼續下一個
-            console.log('[Gemini 分類助手] [標題提取] 選擇器', selector, '查詢出錯:', e.message);
+            _log.debug('[Gemini 分類助手] [標題提取] 選擇器', selector, '查詢出錯:', e.message);
           }
         }
       }
 
       // 策略 4: 從頁面標題提取
       if (!title && document.title) {
-        console.log('[Gemini 分類助手] [標題提取] 策略 4: 從 document.title 提取...');
-        console.log('[Gemini 分類助手] [標題提取] document.title:', document.title);
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 4: 從 document.title 提取...');
+        _log.debug('[Gemini 分類助手] [標題提取] document.title:', document.title);
         
         // 嘗試多種格式
         let pageTitle = document.title;
@@ -2627,15 +2674,15 @@
         if (pageTitle && pageTitle.length > 2 && !(__excludedRegex && __excludedRegex.test(pageTitle))) {
           title = pageTitle;
           foundBy = 'document.title';
-          console.log('[Gemini 分類助手] [標題提取] ✓ 策略 4 成功: 從 document.title 找到標題:', title);
+          _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 4 成功: 從 document.title 找到標題:', title);
         } else {
-          console.log('[Gemini 分類助手] [標題提取] ⚠️ document.title 不符合要求:', pageTitle);
+          _log.debug('[Gemini 分類助手] [標題提取] ⚠️ document.title 不符合要求:', pageTitle);
         }
       }
 
       // 策略 5: 查找頁面上方區域的第一個有意義文本（作為最後手段）
       if (!title) {
-        console.log('[Gemini 分類助手] [標題提取] 策略 5: 查找頁面上方區域...');
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 5: 查找頁面上方區域...');
         try {
           // 查找頁面頂部的容器
           const topContainers = document.querySelectorAll('header, [role="banner"], [class*="header"], [class*="top"]');
@@ -2648,20 +2695,20 @@
               if (!(__excludedRegex && __excludedRegex.test(line)) && line.length > 2 && line.length < 100) {
                 title = line;
                 foundBy = 'top-container';
-                console.log('[Gemini 分類助手] [標題提取] ✓ 策略 5 成功: 從頂部容器找到標題:', title);
+                _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 5 成功: 從頂部容器找到標題:', title);
                 break;
               }
             }
             if (title) break;
           }
         } catch (e) {
-          console.log('[Gemini 分類助手] [標題提取] 策略 5 執行出錯:', e.message);
+          _log.debug('[Gemini 分類助手] [標題提取] 策略 5 執行出錯:', e.message);
         }
       }
 
       // 策略 6: 查找聊天區域的第一個用戶輸入或對話標題元素
       if (!title) {
-        console.log('[Gemini 分類助手] [標題提取] 策略 6: 查找聊天區域...');
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 6: 查找聊天區域...');
         try {
           // 查找可能包含對話標題的元素
           const chatAreaSelectors = [
@@ -2685,23 +2732,23 @@
                   text.trim().length < 200) {
                 title = text.trim();
                 foundBy = selector;
-                console.log('[Gemini 分類助手] [標題提取] ✓ 策略 6 成功: 從', selector, '找到標題:', title);
+                _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 6 成功: 從', selector, '找到標題:', title);
                 break;
               }
             }
             if (title) break;
           }
         } catch (e) {
-          console.log('[Gemini 分類助手] [標題提取] 策略 6 執行出錯:', e.message);
+          _log.debug('[Gemini 分類助手] [標題提取] 策略 6 執行出錯:', e.message);
         }
       }
 
       // 策略 7: 從側邊欄查找當前選中的對話標題（作為最後手段，如果策略0沒找到）
       if (!title) {
-        console.log('[Gemini 分類助手] [標題提取] 策略 7: 從側邊欄查找當前選中的對話（備用策略）...');
+        _log.debug('[Gemini 分類助手] [標題提取] 策略 7: 從側邊欄查找當前選中的對話（備用策略）...');
         try {
           // 查找側邊欄中選中或活動的對話項目
-          console.log('[Gemini 分類助手] [標題提取] 策略 7.1: 查找側邊欄選中項...');
+          _log.debug('[Gemini 分類助手] [標題提取] 策略 7.1: 查找側邊欄選中項...');
           const sidebarSelectors = [
             '[class*="conversation-item"][aria-selected="true"]',
             '[class*="conversation-item"][class*="selected"]',
@@ -2718,7 +2765,7 @@
             const element = document.querySelector(selector);
             if (element) {
               const text = element.innerText || element.textContent || '';
-              console.log('[Gemini 分類助手] [標題提取] 側邊欄選中項內容:', text.substring(0, 100));
+              _log.debug('[Gemini 分類助手] [標題提取] 側邊欄選中項內容:', text.substring(0, 100));
               
               // 只取第一行（標題通常在列表項的第一行）
               const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 2);
@@ -2727,7 +2774,7 @@
                 if (line.length > 2 && !(__excludedRegex && __excludedRegex.test(line)) && line.length < 200) {
                   title = line;
                   foundBy = 'sidebar-selected';
-                  console.log('[Gemini 分類助手] [標題提取] ✓ 策略 7.1 成功: 從側邊欄選中項找到標題:', title);
+                  _log.debug('[Gemini 分類助手] [標題提取] ✓ 策略 7.1 成功: 從側邊欄選中項找到標題:', title);
                   break;
                 }
               }
@@ -2735,7 +2782,7 @@
             }
           }
         } catch (e) {
-          console.log('[Gemini 分類助手] [標題提取] 策略 7 執行出錯:', e.message);
+          _log.debug('[Gemini 分類助手] [標題提取] 策略 7 執行出錯:', e.message);
         }
       }
 
@@ -2774,7 +2821,7 @@
         const isValidLength = titleTrimmed.length >= minLength && titleTrimmed.length <= 200;
         
         if (isGeneric || !isValidLength) {
-          console.log('[Gemini 分類助手] [標題提取] ⚠️ 提取到的標題是通用文本或無效，視為未找到:', titleTrimmed, 
+          _log.debug('[Gemini 分類助手] [標題提取] ⚠️ 提取到的標題是通用文本或無效，視為未找到:', titleTrimmed, 
                      '(isGeneric:', isGeneric, ', isValidLength:', isValidLength, 
                      ', length:', titleTrimmed.length, ', minRequired:', minLength,
                      ', fromReliableSource:', isFromReliableSource, ')');
@@ -2788,7 +2835,7 @@
       let finalFoundBy = foundBy;
       
       if (title && currentChatId) {
-        console.log('[Gemini 分類助手] [標題提取] 檢查存儲中是否有已保存的標題...');
+        _log.debug('[Gemini 分類助手] [標題提取] 檢查存儲中是否有已保存的標題...');
         try {
           // 使用同步方式獲取（通過發送消息到 background）
           // 但這裡我們先檢查提取的標題是否是通用文本
@@ -2796,34 +2843,34 @@
           
           // 如果提取的標題是通用文本，標記為需要從存儲獲取
           if (isExtractedTitleGeneric) {
-            console.log('[Gemini 分類助手] [標題提取] ⚠️ 提取的標題是通用文本:', title, '，將嘗試從存儲獲取');
+            _log.debug('[Gemini 分類助手] [標題提取] ⚠️ 提取的標題是通用文本:', title, '，將嘗試從存儲獲取');
             finalTitle = null; // 標記為需要從存儲獲取
           }
         } catch (e) {
-          console.error('[Gemini 分類助手] [標題提取] 檢查標題時發生錯誤:', e);
+          _log.error('[Gemini 分類助手] [標題提取] 檢查標題時發生錯誤:', e);
         }
       }
       
       // 更新標題
       if (finalTitle && finalTitle !== currentTitle) {
         currentTitle = finalTitle;
-        console.log('[Gemini 分類助手] [標題提取] ✨ 成功提取標題！');
-        console.log('[Gemini 分類助手] [標題提取] 標題:', finalTitle);
-        console.log('[Gemini 分類助手] [標題提取] 提取方式:', finalFoundBy);
-        console.log('[Gemini 分類助手] [標題提取] 對話 ID:', currentChatId);
+        _log.debug('[Gemini 分類助手] [標題提取] ✨ 成功提取標題！');
+        _log.debug('[Gemini 分類助手] [標題提取] 標題:', finalTitle);
+        _log.debug('[Gemini 分類助手] [標題提取] 提取方式:', finalFoundBy);
+        _log.debug('[Gemini 分類助手] [標題提取] 對話 ID:', currentChatId);
         
         // 重置嘗試次數，因為已經找到了
         extractionAttempts = 0;
         
         notifyConversationChange(currentChatId, currentTitle);
       } else if (finalTitle) {
-        console.log('[Gemini 分類助手] [標題提取] 標題未改變，跳過通知 (當前標題:', currentTitle, ')');
+        _log.debug('[Gemini 分類助手] [標題提取] 標題未改變，跳過通知 (當前標題:', currentTitle, ')');
       } else {
-        console.log('[Gemini 分類助手] [標題提取] ❌ 未能提取有效標題 (嘗試 #' + extractionAttempts + ')');
+        _log.debug('[Gemini 分類助手] [標題提取] ❌ 未能提取有效標題 (嘗試 #' + extractionAttempts + ')');
         
         // 如果嘗試太多次仍未找到，嘗試從存儲中獲取
         if (extractionAttempts >= MAX_EXTRACTION_ATTEMPTS && currentChatId) {
-          console.log('[Gemini 分類助手] [標題提取] ⚠️ 已達到最大嘗試次數，嘗試從存儲獲取標題...');
+          _log.debug('[Gemini 分類助手] [標題提取] ⚠️ 已達到最大嘗試次數，嘗試從存儲獲取標題...');
           // 異步從存儲獲取標題
           const storageKey = `conversationStates_${currentUserProfile || 'default'}`;
           chrome.storage.local.get([storageKey], (result) => {
@@ -2834,7 +2881,7 @@
               const savedTitle = savedConversation.title.trim();
               const isGeneric = __allExcluded.some(g => savedTitle.toLowerCase() === g.toLowerCase());
               if (!isGeneric && savedTitle.length >= 2) {
-                console.log('[Gemini 分類助手] [標題提取] ✓ 從存儲獲取標題:', savedTitle);
+                _log.debug('[Gemini 分類助手] [標題提取] ✓ 從存儲獲取標題:', savedTitle);
                 currentTitle = savedTitle;
                 notifyConversationChange(currentChatId, currentTitle);
                 return;
@@ -2843,7 +2890,7 @@
             
             // 如果存儲中也沒有有效標題，發送 null
             if (currentTitle === null) {
-              console.log('[Gemini 分類助手] [標題提取] 發送對話 ID（標題為 null）');
+              _log.debug('[Gemini 分類助手] [標題提取] 發送對話 ID（標題為 null）');
               notifyConversationChange(currentChatId, null);
             }
           });
@@ -2852,8 +2899,8 @@
         }
       }
     } catch (error) {
-      console.error('[Gemini 分類助手] [標題提取] ❌ 提取標題時發生錯誤:', error);
-      console.error('[Gemini 分類助手] [標題提取] 錯誤堆疊:', error.stack);
+      _log.error('[Gemini 分類助手] [標題提取] ❌ 提取標題時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [標題提取] 錯誤堆疊:', error.stack);
     }
   }
 
@@ -2861,12 +2908,12 @@
   // 驗證場景：只要找到匹配的鏈接就返回其文本，不嚴格排除通用文本
   function extractTitleByChatId(targetChatId) {
     if (!targetChatId) {
-      console.log('[Gemini 分類助手] [標題驗證] 缺少 chatId，跳過提取');
+      _log.debug('[Gemini 分類助手] [標題驗證] 缺少 chatId，跳過提取');
       return null;
     }
 
     try {
-      console.log('[Gemini 分類助手] [標題驗證] 開始為 chatId 提取標題:', targetChatId);
+      _log.debug('[Gemini 分類助手] [標題驗證] 開始為 chatId 提取標題:', targetChatId);
 
       // 取得 adapter
       const __registry = window.__GAPI_SiteRegistry;
@@ -2878,7 +2925,7 @@
         ? __adapter.sidebarLinkSelector(targetChatId)
         : 'a[href*="' + targetChatId + '"]';
       const links = document.querySelectorAll(linkSelector);
-      console.log('[Gemini 分類助手] [標題驗證] 找到', links.length, '個包含該 chatId 的鏈接');
+      _log.debug('[Gemini 分類助手] [標題驗證] 找到', links.length, '個包含該 chatId 的鏈接');
       
       for (const link of links) {
         // 檢查是否在對話列表區域（優先選擇對話列表中的鏈接）
@@ -2889,7 +2936,7 @@
                                    link.closest('[role="navigation"], nav, [class*="navigation"], [class*="menu"]') !== null;
         
         if (isInNavigationMenu) {
-          console.log('[Gemini 分類助手] [標題驗證] 跳過導航菜單中的鏈接');
+          _log.debug('[Gemini 分類助手] [標題驗證] 跳過導航菜單中的鏈接');
           continue;
         }
         
@@ -2926,22 +2973,22 @@
         if (textTrimmed && textTrimmed.length >= 2 && textTrimmed.length <= 300) {
           // 如果確實在對話列表區域，直接接受
           if (isInConversationList) {
-            console.log('[Gemini 分類助手] [標題驗證] ✓ 從對話列表區域提取標題:', textTrimmed);
+            _log.debug('[Gemini 分類助手] [標題驗證] ✓ 從對話列表區域提取標題:', textTrimmed);
             return textTrimmed;
           }
           
           // 如果不在對話列表區域，但也不是明顯的導航文本，也接受
           if (__navPatterns.indexOf(textTrimmed) === -1) {
-            console.log('[Gemini 分類助手] [標題驗證] ✓ 提取標題（不在對話列表中但匹配 chatId）:', textTrimmed);
+            _log.debug('[Gemini 分類助手] [標題驗證] ✓ 提取標題（不在對話列表中但匹配 chatId）:', textTrimmed);
             return textTrimmed;
           }
         }
       }
       
-      console.log('[Gemini 分類助手] [標題驗證] ❌ 未能提取有效標題 (chatId: ' + targetChatId + ')');
+      _log.debug('[Gemini 分類助手] [標題驗證] ❌ 未能提取有效標題 (chatId: ' + targetChatId + ')');
       return null;
     } catch (error) {
-      console.error('[Gemini 分類助手] [標題驗證] 提取標題時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [標題驗證] 提取標題時發生錯誤:', error);
       return null;
     }
   }
@@ -2952,24 +2999,24 @@
     try {
       // 檢查 runtime 是否有效
       if (!isRuntimeValid()) {
-        console.warn('[Gemini 分類助手] [通知] ⚠️ 擴展上下文已失效，跳過發送消息 (chatId:', chatId, ', title:', title || '(null)', ')');
-        console.warn('[Gemini 分類助手] [通知] 💡 提示: 這通常發生在擴展被重新加載時，刷新頁面即可恢復');
+        _log.warn('[Gemini 分類助手] [通知] ⚠️ 擴展上下文已失效，跳過發送消息 (chatId:', chatId, ', title:', title || '(null)', ')');
+        _log.warn('[Gemini 分類助手] [通知] 💡 提示: 這通常發生在擴展被重新加載時，刷新頁面即可恢復');
         return;
       }
 
       // 確保用戶檔案已檢測（在頁面切換時應該已經檢測過，這裡作為備用）
       if (!currentUserProfile || currentUserProfile === 'default') {
-        console.log('[Gemini 分類助手] [通知] ⚠️ 用戶檔案未檢測或為默認值，重新檢測...');
+        _log.debug('[Gemini 分類助手] [通知] ⚠️ 用戶檔案未檢測或為默認值，重新檢測...');
         try {
           detectUserProfile();
         } catch (error) {
-          console.error('[Gemini 分類助手] [通知] 檢測用戶檔案時發生錯誤:', error);
+          _log.error('[Gemini 分類助手] [通知] 檢測用戶檔案時發生錯誤:', error);
           currentUserProfile = 'default';
         }
       }
       
       // 記錄當前用戶檔案（用於調試）
-      console.log('[Gemini 分類助手] [通知] 當前用戶檔案:', currentUserProfile || 'default');
+      _log.debug('[Gemini 分類助手] [通知] 當前用戶檔案:', currentUserProfile || 'default');
       
       const data = {
         chatId: chatId,
@@ -2984,17 +3031,17 @@
           lastNotifiedData.chatId === chatId && 
           lastNotifiedData.title === title &&
           lastNotifiedData.userProfile === data.userProfile) {
-        console.log('[Gemini 分類助手] [通知] 跳過重複通知 (chatId:', chatId, ', title:', title, ', profile:', data.userProfile, ')');
+        _log.debug('[Gemini 分類助手] [通知] 跳過重複通知 (chatId:', chatId, ', title:', title, ', profile:', data.userProfile, ')');
         return;
       }
 
       lastNotifiedData = { ...data };
 
-      console.log('[Gemini 分類助手] [通知] 📤 準備發送對話狀態變化:');
-      console.log('[Gemini 分類助手] [通知]   - Chat ID:', chatId);
-      console.log('[Gemini 分類助手] [通知]   - Title:', title || '(null)');
-      console.log('[Gemini 分類助手] [通知]   - URL:', data.url);
-      console.log('[Gemini 分類助手] [通知]   - User Profile:', data.userProfile);
+      _log.debug('[Gemini 分類助手] [通知] 📤 準備發送對話狀態變化:');
+      _log.debug('[Gemini 分類助手] [通知]   - Chat ID:', chatId);
+      _log.debug('[Gemini 分類助手] [通知]   - Title:', title || '(null)');
+      _log.debug('[Gemini 分類助手] [通知]   - URL:', data.url);
+      _log.debug('[Gemini 分類助手] [通知]   - User Profile:', data.userProfile);
 
       // 【修正通訊崩潰】所有 sendMessage 前必須加上檢查，防止 context invalidated 錯誤
       if (!chrome.runtime?.id) {
@@ -3009,20 +3056,20 @@
         action: 'conversationStateChanged',
         data: data
       }).then(() => {
-        console.log('[Gemini 分類助手] [通知] ✓ 消息發送成功');
+        _log.debug('[Gemini 分類助手] [通知] ✓ 消息發送成功');
       }).catch((error) => {
         // 檢查是否是擴展上下文失效的錯誤
         const errorMessage = error.message || error.toString();
         if (errorMessage.includes('Extension context invalidated') || 
             errorMessage.includes('message port closed') ||
             !isRuntimeValid()) {
-          console.warn('[Gemini 分類助手] [通知] ⚠️ 擴展上下文已失效，無法發送消息');
-          console.warn('[Gemini 分類助手] [通知] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
+          _log.warn('[Gemini 分類助手] [通知] ⚠️ 擴展上下文已失效，無法發送消息');
+          _log.warn('[Gemini 分類助手] [通知] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
           // 不要重試，因為上下文已失效
           return;
         }
         // 其他錯誤（如 Side Panel 或後台未開啟），這不是嚴重錯誤
-        console.log('[Gemini 分類助手] [通知] ⚠️ 消息發送失敗 (可能接收方未開啟):', errorMessage);
+        _log.debug('[Gemini 分類助手] [通知] ⚠️ 消息發送失敗 (可能接收方未開啟):', errorMessage);
       });
 
     } catch (error) {
@@ -3032,14 +3079,14 @@
       if (errorMessage.includes('Extension context invalidated') || 
           errorMessage.includes('message port closed') ||
           !isRuntimeValid()) {
-        console.warn('[Gemini 分類助手] [通知] ⚠️ 擴展上下文已失效');
-        console.warn('[Gemini 分類助手] [通知] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
+        _log.warn('[Gemini 分類助手] [通知] ⚠️ 擴展上下文已失效');
+        _log.warn('[Gemini 分類助手] [通知] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
         return;
       }
       
       // 其他錯誤
-      console.error('[Gemini 分類助手] [通知] ❌ 通知對話狀態變化時發生錯誤:', error);
-      console.error('[Gemini 分類助手] [通知] 錯誤堆疊:', error.stack);
+      _log.error('[Gemini 分類助手] [通知] ❌ 通知對話狀態變化時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [通知] 錯誤堆疊:', error.stack);
     }
   }
 
@@ -3048,19 +3095,19 @@
     // 即使沒有 currentChatId，也嘗試設置監控（用於檢測新對話）
     // 但優先檢查是否有 currentChatId
     if (!currentChatId) {
-      console.log('[Gemini 分類助手] [消息監測] ⚠️ 沒有當前對話 ID，但仍設置監控以檢測新對話');
+      _log.debug('[Gemini 分類助手] [消息監測] ⚠️ 沒有當前對話 ID，但仍設置監控以檢測新對話');
       // 不返回，繼續設置監控，這樣可以檢測到新對話
     }
 
     // 【修復】在創建觀察器前先檢查 runtime 是否有效
     if (!isRuntimeValid()) {
-      console.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，延遲設置監控...');
-      console.warn('[Gemini 分類助手] [消息監測] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
+      _log.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，延遲設置監控...');
+      _log.warn('[Gemini 分類助手] [消息監測] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
       // 設置定期檢查，當上下文恢復時自動重新設置
       timerManager.setInterval('msgRecovery', () => {
         if (!isMonitoring) return;
         if (isRuntimeValid()) {
-          console.log('[Gemini 分類助手] [消息監測] ✓ 擴展上下文已恢復，重新設置監控');
+          _log.debug('[Gemini 分類助手] [消息監測] ✓ 擴展上下文已恢復，重新設置監控');
           timerManager.clear('msgRecovery');
           timerManager.clear('msgRecoveryTimeout');
           setupMessageMonitoring();
@@ -3080,15 +3127,15 @@
     const messageObserverCallback = (mutations) => {
       // 檢查 runtime 是否有效
       if (!isRuntimeValid()) {
-        console.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，停止觀察');
-        console.warn('[Gemini 分類助手] [消息監測] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
+        _log.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，停止觀察');
+        _log.warn('[Gemini 分類助手] [消息監測] 💡 提示: 這通常發生在擴展被重新加載時，請刷新頁面以恢復功能');
         observerManager.disconnect('messageObserver');
         messageObserver = null;
         // 嘗試自動恢復（當上下文恢復時）
         timerManager.setInterval('msgCallbackRecovery', () => {
           if (!isMonitoring) return;
           if (isRuntimeValid()) {
-            console.log('[Gemini 分類助手] [消息監測] ✓ 擴展上下文已恢復，重新設置監控');
+            _log.debug('[Gemini 分類助手] [消息監測] ✓ 擴展上下文已恢復，重新設置監控');
             timerManager.clear('msgCallbackRecovery');
             timerManager.clear('msgCallbackRecoveryTimeout');
             setupMessageMonitoring();
@@ -3111,7 +3158,7 @@
         let hasNewResponse = false;
         if (currentCount > lastModelResponseCount) {
           hasNewResponse = true;
-          // console.log('[Gemini 分類助手] [消息監測] 檢測到新的模型回復 (數量:', currentCount, ')'); // 已禁用，避免大量日誌
+          // _log.debug('[Gemini 分類助手] [消息監測] 檢測到新的模型回復 (數量:', currentCount, ')'); // 已禁用，避免大量日誌
         } else {
           // 檢查現有回復是否還在更新（例如打字效果）
           currentModelResponses.forEach(el => {
@@ -3133,7 +3180,7 @@
           
           // 等待 1 秒後提取（確保內容已完全生成）
           scrapeTimeout = setTimeout(() => {
-            // console.log('[Gemini 分類助手] [消息監測] 觸發對話提取（檢測到新回復）'); // 已禁用，避免大量日誌
+            // _log.debug('[Gemini 分類助手] [消息監測] 觸發對話提取（檢測到新回復）'); // 已禁用，避免大量日誌
             scrapeMessages();
             scrapeTimeout = null;
           }, 1000);
@@ -3177,7 +3224,7 @@
                                      img.naturalWidth > 0;
                       
                       if (isLoaded) {
-                        // console.log('[Gemini 分類助手] [消息監測] 檢測到圖片已加載 (class="loaded"):', img.src?.substring(0, 100)); // 已禁用，避免大量日誌
+                        // _log.debug('[Gemini 分類助手] [消息監測] 檢測到圖片已加載 (class="loaded"):', img.src?.substring(0, 100)); // 已禁用，避免大量日誌
                         // 延遲一點再提取，確保 DOM 完全更新
                         setTimeout(() => {
                           if (isRuntimeValid()) {
@@ -3210,7 +3257,7 @@
                     // 監聽圖片加載完成事件（作為備用）
                     if (!img.complete || img.naturalWidth === 0) {
                       img.addEventListener('load', function() {
-                        // console.log('[Gemini 分類助手] [消息監測] 圖片加載完成:', img.src?.substring(0, 100)); // 已禁用，避免大量日誌
+                        // _log.debug('[Gemini 分類助手] [消息監測] 圖片加載完成:', img.src?.substring(0, 100)); // 已禁用，避免大量日誌
                         setTimeout(() => {
                           if (isRuntimeValid()) {
                             scrapeMessages();
@@ -3233,7 +3280,7 @@
               
               // 如果類名變更為 loaded，觸發提取（使用異步方式避免阻塞）
               if (mutation.attributeName === 'class' && imgClasses.includes('loaded')) {
-                // console.log('[Gemini 分類助手] [消息監測] 檢測到圖片類名變更為 loaded:', img.src?.substring(0, 100)); // 已禁用，避免大量日誌
+                // _log.debug('[Gemini 分類助手] [消息監測] 檢測到圖片類名變更為 loaded:', img.src?.substring(0, 100)); // 已禁用，避免大量日誌
                 setTimeout(() => {
                   if (isRuntimeValid()) {
                     if (window.requestIdleCallback) {
@@ -3254,7 +3301,7 @@
                   }
                 }, 500);
               } else if (mutation.attributeName === 'src' || mutation.attributeName === 'data-src') {
-                // console.log('[Gemini 分類助手] [消息監測] 檢測到圖片屬性變化:', img.src?.substring(0, 100)); // 已禁用，避免大量日誌
+                // _log.debug('[Gemini 分類助手] [消息監測] 檢測到圖片屬性變化:', img.src?.substring(0, 100)); // 已禁用，避免大量日誌
                 setTimeout(() => {
                   if (isRuntimeValid()) {
                     if (window.requestIdleCallback) {
@@ -3283,11 +3330,11 @@
         const errorMessage = error.message || error.toString();
         if (errorMessage.includes('Extension context invalidated') || 
             errorMessage.includes('message port closed')) {
-          console.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，停止觀察');
+          _log.warn('[Gemini 分類助手] [消息監測] ⚠️ 擴展上下文已失效，停止觀察');
           observerManager.disconnect('messageObserver');
           messageObserver = null;
         } else {
-          console.error('[Gemini 分類助手] [消息監測] 檢測消息變化時發生錯誤:', error);
+          _log.error('[Gemini 分類助手] [消息監測] 檢測消息變化時發生錯誤:', error);
         }
       }
     };
@@ -3301,7 +3348,7 @@
             attributes: true,
             attributeFilter: ['src', 'data-src', 'data-original', 'class', 'complete']
           });
-          console.log('[Gemini 分類助手] [消息監測] ✓ 消息觀察器已設置（支持圖片監測）');
+          _log.debug('[Gemini 分類助手] [消息監測] ✓ 消息觀察器已設置（支持圖片監測）');
       
       // 立即執行一次提取（使用 requestIdleCallback 避免阻塞主線程）
       if (window.requestIdleCallback) {
@@ -3334,7 +3381,7 @@
         }
       }, 5000);
     } else {
-      console.error('[Gemini 分類助手] [消息監測] ❌ document.body 不存在，無法設置觀察器');
+      _log.error('[Gemini 分類助手] [消息監測] ❌ document.body 不存在，無法設置觀察器');
     }
     
     // 設置專門的圖片監控
@@ -3344,7 +3391,7 @@
   // 【暴力修正版】監控單個圖片容器：鎖定 button.image-button，只要 img 類名包含 loaded，強行提取
   function setupImageObserver(container) {
     try {
-      console.log('[Gemini 分類助手] [圖片追蹤] 🔥 暴力模式：設置圖片容器監控...');
+      _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 暴力模式：設置圖片容器監控...');
       
       // 1. 【無視 ID 限制】直接生成 requestId，不等待生成圖片元數據
       const requestId = 'img_' + Date.now();
@@ -3358,13 +3405,13 @@
       }
       
       if (!img) {
-        console.log('[Gemini 分類助手] [圖片追蹤]   ⚠️ 未找到圖片元素，跳過監控');
+        _log.debug('[Gemini 分類助手] [圖片追蹤]   ⚠️ 未找到圖片元素，跳過監控');
         return;
       }
       
-      console.log('[Gemini 分類助手] [圖片追蹤]   ✓ 找到圖片元素');
-      console.log('[Gemini 分類助手] [圖片追蹤]   img.className:', img.className);
-      console.log('[Gemini 分類助手] [圖片追蹤]   當前 src:', img.src?.substring(0, 100) || '無');
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   ✓ 找到圖片元素');
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   img.className:', img.className);
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   當前 src:', img.src?.substring(0, 100) || '無');
       
       // 3. 【即時檢查】如果已經是有效圖片，立即觸發
       const currentSrc = img.src || '';
@@ -3374,7 +3421,7 @@
           (currentSrc.includes('lh3.googleusercontent.com') || 
            currentSrc.includes('googleusercontent.com') || 
            (currentSrc.startsWith('blob:') && !currentSrc.startsWith('blob:null/')))) {
-        console.log('[Gemini 分類助手] [圖片追蹤]   ✅ 圖片已經是有效 URL，立即下載');
+        _log.debug('[Gemini 分類助手] [圖片追蹤]   ✅ 圖片已經是有效 URL，立即下載');
         triggerAutoDownload(currentSrc, requestId);
         sendImageToSidePanel(currentSrc, requestId, img);
         return;
@@ -3392,7 +3439,7 @@
             if (currentSrc && currentSrc.length >= 100) {
               const checkResult = await checkDownloadHistory(currentSrc, requestId, currentChatId);
               if (checkResult.exists) {
-                console.log('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
+                _log.debug('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
                 observerManager.disconnect(imgSetupName);
                 return;
               }
@@ -3403,12 +3450,12 @@
           if (mutation.attributeName === 'class' && target === img) {
             const className = img.className || '';
             if (className.includes('loaded')) {
-              console.log('[Gemini 分類助手] [圖片追蹤]   🔥 檢測到類名包含 loaded，強行提取！');
+              _log.debug('[Gemini 分類助手] [圖片追蹤]   🔥 檢測到類名包含 loaded，強行提取！');
               const newSrc = img.src || '';
 
               const checkResult = await checkDownloadHistory(newSrc, requestId, currentChatId);
               if (checkResult.exists) {
-                console.log('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
+                _log.debug('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
                 observerManager.disconnect(imgSetupName);
                 return;
               }
@@ -3419,12 +3466,12 @@
                   (newSrc.includes('lh3.googleusercontent.com') ||
                    newSrc.includes('googleusercontent.com') ||
                    (newSrc.startsWith('blob:') && !newSrc.startsWith('blob:null/')))) {
-                console.log('[Gemini 分類助手] [圖片追蹤]   ✅ 暴力模式：偵測到有效圖片，立即提取！');
-                console.log('[Gemini 分類助手] [圖片追蹤]   完整 URL:', newSrc.substring(0, 150));
+                _log.debug('[Gemini 分類助手] [圖片追蹤]   ✅ 暴力模式：偵測到有效圖片，立即提取！');
+                _log.debug('[Gemini 分類助手] [圖片追蹤]   完整 URL:', newSrc.substring(0, 150));
                 sendImageToSidePanel(newSrc, requestId, img);
                 triggerAutoDownload(newSrc, requestId);
                 observerManager.disconnect(imgSetupName);
-                console.log('[Gemini 分類助手] [圖片追蹤]   ✓ 監控已停止（圖片已提取）');
+                _log.debug('[Gemini 分類助手] [圖片追蹤]   ✓ 監控已停止（圖片已提取）');
               }
             }
           }
@@ -3432,12 +3479,12 @@
           // 【監控 src 變化】同時監聽 src 屬性變化
           if (mutation.attributeName === 'src') {
             const newSrc = img.src || '';
-            console.log('[Gemini 分類助手] [圖片追蹤]   📍 src 屬性已變更:', newSrc.substring(0, 100) || '無');
+            _log.debug('[Gemini 分類助手] [圖片追蹤]   📍 src 屬性已變更:', newSrc.substring(0, 100) || '無');
 
             if (newSrc && newSrc.length >= 100) {
               const checkResult = await checkDownloadHistory(newSrc, requestId, currentChatId);
               if (checkResult.exists) {
-                console.log('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
+                _log.debug('[Gemini 分類助手] [圖片追蹤] ⏭️ 圖片已在資料庫中，停止監聽');
                 observerManager.disconnect(imgSetupName);
                 return;
               }
@@ -3449,11 +3496,11 @@
                 (newSrc.includes('lh3.googleusercontent.com') ||
                  newSrc.includes('googleusercontent.com') ||
                  newSrc.startsWith('blob:'))) {
-              console.log('[Gemini 分類助手] [圖片追蹤]   ✅ 暴力模式：偵測到有效圖片 URL，立即提取！');
+              _log.debug('[Gemini 分類助手] [圖片追蹤]   ✅ 暴力模式：偵測到有效圖片 URL，立即提取！');
               sendImageToSidePanel(newSrc, requestId, img);
               triggerAutoDownload(newSrc, requestId);
               observerManager.disconnect(imgSetupName);
-              console.log('[Gemini 分類助手] [圖片追蹤]   ✓ 監控已停止（圖片已提取）');
+              _log.debug('[Gemini 分類助手] [圖片追蹤]   ✓ 監控已停止（圖片已提取）');
             }
           }
         }
@@ -3464,38 +3511,38 @@
         attributeFilter: ['src', 'class', 'data-src']
       });
 
-      console.log('[Gemini 分類助手] [圖片追蹤]   ✓ MutationObserver 已啟動（監控 class 和 src）...');
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   ✓ MutationObserver 已啟動（監控 class 和 src）...');
 
       // 設置超時（30秒後自動停止監控）
       setTimeout(() => {
         observerManager.disconnect(imgSetupName);
-        console.log('[Gemini 分類助手] [圖片追蹤]   ⏱️ 30 秒超時，停止監控');
+        _log.debug('[Gemini 分類助手] [圖片追蹤]   ⏱️ 30 秒超時，停止監控');
       }, 30000);
       
     } catch (error) {
-      console.error('[Gemini 分類助手] [圖片追蹤] ❌ 設置圖片監控時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [圖片追蹤] ❌ 設置圖片監控時發生錯誤:', error);
     }
   }
 
   // 新增：專門監控圖片變化的函數（圖片追蹤核心功能）
   function setupImageMonitoring() {
     if (!currentChatId) {
-      console.log('[Gemini 分類助手] [圖片追蹤] 跳過設置，因為沒有當前對話 ID');
+      _log.debug('[Gemini 分類助手] [圖片追蹤] 跳過設置，因為沒有當前對話 ID');
       return;
     }
     
-    console.log('[Gemini 分類助手] [圖片追蹤] 🖼️ 開始設置圖片追蹤功能...');
+    _log.debug('[Gemini 分類助手] [圖片追蹤] 🖼️ 開始設置圖片追蹤功能...');
     
     // 立即執行一次圖片提取（查找頁面上已存在的圖片）
     setTimeout(() => {
-      console.log('[Gemini 分類助手] [圖片追蹤] 🔍 立即掃描頁面上的圖片...');
+      _log.debug('[Gemini 分類助手] [圖片追蹤] 🔍 立即掃描頁面上的圖片...');
       extractGeneratedImages();
       
       // 同時對頁面上已存在的所有 .attachment-container.generated-images 設置監控
       const existingContainers = document.querySelectorAll('.attachment-container.generated-images');
-      console.log('[Gemini 分類助手] [圖片追蹤]   找到', existingContainers.length, '個已存在的圖片容器，開始監控...');
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   找到', existingContainers.length, '個已存在的圖片容器，開始監控...');
       existingContainers.forEach((container, index) => {
-        console.log('[Gemini 分類助手] [圖片追蹤]   設置容器 #' + (index + 1) + ' 的監控');
+        _log.debug('[Gemini 分類助手] [圖片追蹤]   設置容器 #' + (index + 1) + ' 的監控');
         setupImageObserver(container);
       });
       
@@ -3506,14 +3553,14 @@
     // 如果已有圖片觀察器，先停止它
     // observerManager.create 會自動斷開同名舊觀察器
     if (!document.body) {
-      console.error('[Gemini 分類助手] [圖片監控] ❌ document.body 不存在，無法設置觀察器');
+      _log.error('[Gemini 分類助手] [圖片監控] ❌ document.body 不存在，無法設置觀察器');
       return;
     }
 
     imageObserver = observerManager.create('imageObserver', document.body, (mutations) => {
       // 檢查 runtime 是否有效
       if (!isRuntimeValid()) {
-        console.warn('[Gemini 分類助手] [圖片監控] ⚠️ 擴展上下文已失效，停止觀察');
+        _log.warn('[Gemini 分類助手] [圖片監控] ⚠️ 擴展上下文已失效，停止觀察');
         observerManager.disconnect('imageObserver');
         imageObserver = null;
         return;
@@ -3537,7 +3584,7 @@
               
               // 如果找到圖片容器，立即設置監控（延遲一點確保 DOM 完全構建）
               if (imageContainer) {
-                // console.log('[Gemini 分類助手] [圖片追蹤] 🎯 檢測到新的 .attachment-container.generated-images，立即設置監控'); // 已禁用，避免大量日誌
+                // _log.debug('[Gemini 分類助手] [圖片追蹤] 🎯 檢測到新的 .attachment-container.generated-images，立即設置監控'); // 已禁用，避免大量日誌
                 hasImageChanges = true;
                 // 延遲一點點，確保 DOM 完全構建
                 setTimeout(() => {
@@ -3553,7 +3600,7 @@
               
               if (node.tagName === 'BUTTON' && (nodeClassName.includes('image-button') || nodeClassName.includes('image'))) {
                 hasImageChanges = true;
-                // console.log('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到新的 button.image-button，立即設置監控'); // 已禁用，避免大量日誌
+                // _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到新的 button.image-button，立即設置監控'); // 已禁用，避免大量日誌
                 setTimeout(() => {
                   setupImageObserver(node);
                 }, 100);
@@ -3574,7 +3621,7 @@
                   node.getAttribute('aria-label')?.includes('顯示大圖') ||
                   node.getAttribute('aria-label')?.includes('燈箱')) {
                 hasImageChanges = true;
-                // console.log('[Gemini 分類助手] [圖片追蹤] 檢測到新的圖片相關元素:', node.tagName, nodeClassName.substring(0, 50)); // 已禁用，避免大量日誌
+                // _log.debug('[Gemini 分類助手] [圖片追蹤] 檢測到新的圖片相關元素:', node.tagName, nodeClassName.substring(0, 50)); // 已禁用，避免大量日誌
               }
             }
           });
@@ -3589,7 +3636,7 @@
           // 【監控類名變化】只要 img 類名變更為包含 loaded，強行提取
           if (mutation.attributeName === 'class' && imgClasses.includes('loaded')) {
             hasImageChanges = true;
-            // console.log('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到圖片類名變更為 loaded，強行提取！'); // 已禁用，避免大量日誌
+            // _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到圖片類名變更為 loaded，強行提取！'); // 已禁用，避免大量日誌
             
             // 【跳過佔位符】寫死規則
             if (imgSrc && imgSrc.length >= 100 && 
@@ -3599,7 +3646,7 @@
                  imgSrc.includes('googleusercontent.com') || 
                  (imgSrc.startsWith('blob:') && !imgSrc.startsWith('blob:null/')))) {
               const requestId = 'img_loaded_' + Date.now();
-              // console.log('[Gemini 分類助手] [圖片追蹤]   ✅ 類名變為 loaded，立即提取！'); // 已禁用，避免大量日誌
+              // _log.debug('[Gemini 分類助手] [圖片追蹤]   ✅ 類名變為 loaded，立即提取！'); // 已禁用，避免大量日誌
               sendImageToSidePanel(imgSrc, requestId, img);
               triggerAutoDownload(imgSrc, requestId);
             }
@@ -3617,7 +3664,7 @@
                  newSrc.includes('googleusercontent.com') || 
                  newSrc.startsWith('blob:'))) {
               hasImageChanges = true;
-              // console.log('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到有效圖片 URL 變化，立即提取！:', newSrc.substring(0, 100)); // 已禁用，避免大量日誌
+              // _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 檢測到有效圖片 URL 變化，立即提取！:', newSrc.substring(0, 100)); // 已禁用，避免大量日誌
               
               const requestId = 'img_src_' + Date.now();
               sendImageToSidePanel(newSrc, requestId, img);
@@ -3637,7 +3684,7 @@
           
           if (expansionDialogs.length > 0) {
             hasImageChanges = true;
-            console.log('[Gemini 分類助手] [圖片監控] 檢測到圖片展開對話框（燈箱）打開');
+            _log.debug('[Gemini 分類助手] [圖片監控] 檢測到圖片展開對話框（燈箱）打開');
           }
         }
       });
@@ -3652,7 +3699,7 @@
         attributes: true,
         attributeFilter: ['src', 'data-src', 'data-original', 'class', 'href', 'aria-label']
       });
-      console.log('[Gemini 分類助手] [圖片追蹤] ✓ 圖片觀察器已設置');
+      _log.debug('[Gemini 分類助手] [圖片追蹤] ✓ 圖片觀察器已設置');
     
   }
 
@@ -3783,7 +3830,7 @@
     const __imgRegistry = window.__GAPI_SiteRegistry;
     const __imgAdapter = __imgRegistry ? __imgRegistry.getCurrentAdapter() : null;
     try {
-      console.log('[Gemini 分類助手] [對話提取] 開始提取圖片，元素:', element.tagName, element.className?.substring(0, 100));
+      _log.debug('[Gemini 分類助手] [對話提取] 開始提取圖片，元素:', element.tagName, element.className?.substring(0, 100));
       
       // 策略 1: 擴大搜索範圍 - 尋找所有帶有 role="img"、aria-label 包含 'Generated'、或包含圖片按鈕的容器
       // 也包括圖片展開對話框（燈箱）- image-expansion-dialog
@@ -3830,7 +3877,7 @@
       );
       
       expansionDialogs.forEach(dialog => {
-        console.log('[Gemini 分類助手] [對話提取] 找到圖片展開對話框（燈箱）');
+        _log.debug('[Gemini 分類助手] [對話提取] 找到圖片展開對話框（燈箱）');
         const dialogImgs = dialog.querySelectorAll('img');
         const dialogButtons = dialog.querySelectorAll(
           'button[class*="download"], ' +
@@ -3852,7 +3899,7 @@
               imgData.source = 'expansion-dialog';
               imgData.isFullSize = true;
               images.push(imgData);
-              console.log('[Gemini 分類助手] [對話提取] 從圖片展開對話框（燈箱）提取高品質圖片:', imgSrc.substring(0, 100));
+              _log.debug('[Gemini 分類助手] [對話提取] 從圖片展開對話框（燈箱）提取高品質圖片:', imgSrc.substring(0, 100));
             }
           }
         });
@@ -3876,12 +3923,12 @@
               hasDownloadButton: true,
               isFullSize: true
             });
-            console.log('[Gemini 分類助手] [對話提取] 從燈箱按鈕提取下載連結:', downloadUrl.substring(0, 100));
+            _log.debug('[Gemini 分類助手] [對話提取] 從燈箱按鈕提取下載連結:', downloadUrl.substring(0, 100));
           }
         });
       });
       
-      console.log('[Gemini 分類助手] [對話提取] 找到', generatedImageContainers.length, '個生成圖片容器（role="img" 或 aria-label 包含 Generated）');
+      _log.debug('[Gemini 分類助手] [對話提取] 找到', generatedImageContainers.length, '個生成圖片容器（role="img" 或 aria-label 包含 Generated）');
       
       // 首先處理生成圖片容器（優先級最高）
       generatedImageContainers.forEach(container => {
@@ -3903,7 +3950,7 @@
                                       containerClassName.includes('attachment-container'));
 
         if (hasGeneratedImageMarker) {
-          console.log('[Gemini 分類助手] [對話提取] 找到生成圖片容器:', container.tagName, container.className?.substring(0, 100));
+          _log.debug('[Gemini 分類助手] [對話提取] 找到生成圖片容器:', container.tagName, container.className?.substring(0, 100));
         }
         
         // 查找容器內的圖片（包括 button 內的圖片）
@@ -3938,7 +3985,7 @@
         });
         
         if (hasGeneratedImageMarker && containerImgs.length > 0) {
-          console.log('[Gemini 分類助手] [對話提取] 在生成圖片容器中找到', containerImgs.length, '個圖片');
+          _log.debug('[Gemini 分類助手] [對話提取] 在生成圖片容器中找到', containerImgs.length, '個圖片');
         }
         
         // 深入搜索：在 image-button 內部，檢查是否有 a 標籤（連結）或具有 download 屬性的元素
@@ -3981,7 +4028,7 @@
               imgSrc.includes('/picture/') ||
               imgSrc.includes('profile-picture') ||
               imgSrc.includes('avatar')) {
-            console.log('[Gemini 分類助手] [對話提取] 跳過頭像圖片:', imgSrc.substring(0, 100));
+            _log.debug('[Gemini 分類助手] [對話提取] 跳過頭像圖片:', imgSrc.substring(0, 100));
             return;
           }
           
@@ -4012,7 +4059,7 @@
                 source: 'download-link',
                 hasDownloadButton: true
               });
-              console.log('[Gemini 分類助手] [對話提取] 從下載連結提取圖片:', downloadUrl.substring(0, 100));
+              _log.debug('[Gemini 分類助手] [對話提取] 從下載連結提取圖片:', downloadUrl.substring(0, 100));
             }
           });
         }
@@ -4028,7 +4075,7 @@
       
       // 策略 2: 在 Model 回應區域內查找所有 img 標籤（精準過濾）
       const allImgs = element.querySelectorAll('img');
-      console.log('[Gemini 分類助手] [對話提取] 在元素中找到', allImgs.length, '個 img 標籤');
+      _log.debug('[Gemini 分類助手] [對話提取] 在元素中找到', allImgs.length, '個 img 標籤');
       
       // 測試日誌：輸出目前畫面上找到的所有圖片 src
       const allImageSrcs = [];
@@ -4038,8 +4085,8 @@
           allImageSrcs.push(src.substring(0, 100));
         }
       });
-      console.log('[Gemini 分類助手] [對話提取] 目前畫面上找到的所有圖片 src 數量:', allImageSrcs.length);
-      console.log('[Gemini 分類助手] [對話提取] 圖片 src 列表:', allImageSrcs);
+      _log.debug('[Gemini 分類助手] [對話提取] 目前畫面上找到的所有圖片 src 數量:', allImageSrcs.length);
+      _log.debug('[Gemini 分類助手] [對話提取] 圖片 src 列表:', allImageSrcs);
       
       allImgs.forEach(img => {
         const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
@@ -4110,7 +4157,7 @@
             });
           }
         } catch (e) {
-          console.log('[Gemini 分類助手] [對話提取] Canvas 轉換失敗（可能受 CORS 限制）');
+          _log.debug('[Gemini 分類助手] [對話提取] Canvas 轉換失敗（可能受 CORS 限制）');
         }
       });
       
@@ -4162,7 +4209,7 @@
         });
 
         if (foundGeneratedImage) {
-          console.log('[Gemini 分類助手] [對話提取] 找到生成圖片容器，保存圖片信息');
+          _log.debug('[Gemini 分類助手] [對話提取] 找到生成圖片容器，保存圖片信息');
           
           // 獲取當前對話標題
           const conversationTitle = extractTitle() || '未命名對話';
@@ -4186,17 +4233,17 @@
           chrome.storage.local.set({
             [storageKey]: imageInfo
           }).then(() => {
-            console.log('[Gemini 分類助手] [對話提取] ✓ 圖片信息已保存到 chrome.storage.local');
+            _log.debug('[Gemini 分類助手] [對話提取] ✓ 圖片信息已保存到 chrome.storage.local');
           }).catch(err => {
-            console.error('[Gemini 分類助手] [對話提取] 保存圖片信息失敗:', err);
+            _log.error('[Gemini 分類助手] [對話提取] 保存圖片信息失敗:', err);
           });
         }
       }
       
-      console.log('[Gemini 分類助手] [對話提取] ✓ 圖片提取完成，共', uniqueImages.length, '張圖片（去重後）');
+      _log.debug('[Gemini 分類助手] [對話提取] ✓ 圖片提取完成，共', uniqueImages.length, '張圖片（去重後）');
       return uniqueImages;
     } catch (e) {
-      console.error('[Gemini 分類助手] [對話提取] 提取圖片時發生錯誤:', e.message);
+      _log.error('[Gemini 分類助手] [對話提取] 提取圖片時發生錯誤:', e.message);
       return images;
     }
   }
@@ -4237,7 +4284,7 @@
       
       // 檢查是否是有效的生成圖片（過濾掉頭像、圖示等小圖片）
       if (!isValidGeneratedImage(src, img)) {
-        console.log('[Gemini 分類助手] [對話提取] 跳過非生成圖片:', src ? src.substring(0, 100) : '(空)');
+        _log.debug('[Gemini 分類助手] [對話提取] 跳過非生成圖片:', src ? src.substring(0, 100) : '(空)');
         return null;
       }
       
@@ -4328,7 +4375,7 @@
         imageData.downloadUrl = downloadUrl;
       }
       
-      console.log('[Gemini 分類助手] [對話提取] ✓ 提取圖片:', {
+      _log.debug('[Gemini 分類助手] [對話提取] ✓ 提取圖片:', {
         url: src.substring(0, 100),
         alt: alt.substring(0, 50),
         type: imageData.type,
@@ -4338,7 +4385,7 @@
       
       return imageData;
     } catch (e) {
-      console.error('[Gemini 分類助手] [對話提取] 提取圖片數據時發生錯誤:', e.message);
+      _log.error('[Gemini 分類助手] [對話提取] 提取圖片數據時發生錯誤:', e.message);
       return null;
     }
   }
@@ -4495,7 +4542,7 @@
       const appMatch = url.match(/\/app\/([^/?#]+)/);
       if (appMatch && appMatch[1]) {
         chatIdToUse = appMatch[1];
-        console.log('[Gemini 分類助手] [對話提取] 從 URL 提取到對話 ID:', chatIdToUse);
+        _log.debug('[Gemini 分類助手] [對話提取] 從 URL 提取到對話 ID:', chatIdToUse);
         // 更新 currentChatId
         if (currentChatId !== chatIdToUse) {
           currentChatId = chatIdToUse;
@@ -4507,18 +4554,18 @@
         const hasMessages = document.querySelectorAll('[class*="message"], [class*="user-query"], [class*="model-response"]').length > 0;
         if (hasMessages) {
           chatIdToUse = 'temp_' + Date.now();
-          console.log('[Gemini 分類助手] [對話提取] ⚠️ 使用臨時對話 ID:', chatIdToUse, '(頁面上有消息但沒有對話 ID)');
+          _log.debug('[Gemini 分類助手] [對話提取] ⚠️ 使用臨時對話 ID:', chatIdToUse, '(頁面上有消息但沒有對話 ID)');
           currentChatId = chatIdToUse;
         } else {
-          console.log('[Gemini 分類助手] [對話提取] 跳過提取，因為沒有當前對話 ID 且頁面上沒有消息');
+          _log.debug('[Gemini 分類助手] [對話提取] 跳過提取，因為沒有當前對話 ID 且頁面上沒有消息');
           return [];
         }
       }
     }
 
     try {
-      console.log('[Gemini 分類助手] [對話提取] ========== 開始提取對話記錄 ==========');
-      console.log('[Gemini 分類助手] [對話提取] [調試] 頁面結構分析:');
+      _log.debug('[Gemini 分類助手] [對話提取] ========== 開始提取對話記錄 ==========');
+      _log.debug('[Gemini 分類助手] [對話提取] [調試] 頁面結構分析:');
       
       // 調試：分析頁面中的消息元素（從 adapter 讀取）
       const __scrapeRegistry = window.__GAPI_SiteRegistry;
@@ -4529,17 +4576,17 @@
         '[class*="message"]'
       ];
       
-      console.log('[Gemini 分類助手] [對話提取] [調試] 檢查各種選擇器:');
+      _log.debug('[Gemini 分類助手] [對話提取] [調試] 檢查各種選擇器:');
       debugSelectors.forEach(selector => {
         try {
           const elements = document.querySelectorAll(selector);
           if (elements.length > 0) {
-            console.log(`[Gemini 分類助手] [對話提取] [調試] - "${selector}": 找到 ${elements.length} 個元素`);
+            _log.debug(`[Gemini 分類助手] [對話提取] [調試] - "${selector}": 找到 ${elements.length} 個元素`);
             // 顯示前 3 個元素的文本預覽
             Array.from(elements).slice(0, 3).forEach((el, idx) => {
               const text = extractPlainText(el);
               if (text && text.length > 0) {
-                console.log(`[Gemini 分類助手] [對話提取] [調試]   [${idx}] 文本預覽:`, text.substring(0, 100));
+                _log.debug(`[Gemini 分類助手] [對話提取] [調試]   [${idx}] 文本預覽:`, text.substring(0, 100));
               }
             });
           }
@@ -4555,7 +4602,7 @@
       const extractionStartTime = Date.now();
 
       // 策略 1: 查找用戶消息（selector 從 adapter 讀取）
-      console.log('[Gemini 分類助手] [對話提取] 查找用戶消息...');
+      _log.debug('[Gemini 分類助手] [對話提取] 查找用戶消息...');
       const userMessageSelectors = (__scrapeAdapter && __scrapeAdapter.userMessageSelectors) || [
         '[class*="user-query"]', '[data-role="user"]', '[class*="user-message"]'
       ];
@@ -4565,7 +4612,7 @@
         try {
           const elements = document.querySelectorAll(selector);
           if (elements.length > 0) {
-            console.log(`[Gemini 分類助手] [對話提取] 選擇器 "${selector}" 找到 ${elements.length} 個用戶消息元素`);
+            _log.debug(`[Gemini 分類助手] [對話提取] 選擇器 "${selector}" 找到 ${elements.length} 個用戶消息元素`);
           }
           
           elements.forEach((element, index) => {
@@ -4626,25 +4673,25 @@
             // 檢查是否包含代碼塊
             if (hasCodeBlock(element)) {
               message.codeBlocks = extractCodeBlocks(element);
-              console.log(`[Gemini 分類助手] [對話提取] 用戶消息包含 ${message.codeBlocks.length} 個代碼塊`);
+              _log.debug(`[Gemini 分類助手] [對話提取] 用戶消息包含 ${message.codeBlocks.length} 個代碼塊`);
             }
             
             // 檢查是否包含圖片
             const images = extractImages(element);
             if (images.length > 0) {
               message.images = images;
-              console.log(`[Gemini 分類助手] [對話提取] 用戶消息包含 ${images.length} 張圖片`);
+              _log.debug(`[Gemini 分類助手] [對話提取] 用戶消息包含 ${images.length} 張圖片`);
             }
             
             userMessages.push(message);
           });
         } catch (e) {
-          console.warn(`[Gemini 分類助手] [對話提取] 選擇器 "${selector}" 查詢出錯:`, e.message);
+          _log.warn(`[Gemini 分類助手] [對話提取] 選擇器 "${selector}" 查詢出錯:`, e.message);
         }
       }
 
       // 策略 2: 查找模型回復（selector 從 adapter 讀取）
-      console.log('[Gemini 分類助手] [對話提取] 查找模型回復...');
+      _log.debug('[Gemini 分類助手] [對話提取] 查找模型回復...');
       const modelResponseSelectors = (__scrapeAdapter && __scrapeAdapter.modelResponseSelectors) || [
         '[class*="model-response"]', '[data-role="model"]', '[data-role="assistant"]'
       ];
@@ -4654,7 +4701,7 @@
         try {
           const elements = document.querySelectorAll(selector);
           if (elements.length > 0) {
-            console.log(`[Gemini 分類助手] [對話提取] 選擇器 "${selector}" 找到 ${elements.length} 個模型回復元素`);
+            _log.debug(`[Gemini 分類助手] [對話提取] 選擇器 "${selector}" 找到 ${elements.length} 個模型回復元素`);
           }
           
           elements.forEach((element, index) => {
@@ -4715,29 +4762,29 @@
             // 檢查是否包含代碼塊
             if (hasCodeBlock(element)) {
               message.codeBlocks = extractCodeBlocks(element);
-              console.log(`[Gemini 分類助手] [對話提取] 模型回復包含 ${message.codeBlocks.length} 個代碼塊`);
+              _log.debug(`[Gemini 分類助手] [對話提取] 模型回復包含 ${message.codeBlocks.length} 個代碼塊`);
             }
             
             // 檢查是否包含圖片（重要：Gemini 生成的圖片）
             const images = extractImages(element);
             if (images.length > 0) {
               message.images = images;
-              console.log(`[Gemini 分類助手] [對話提取] 模型回復包含 ${images.length} 張圖片`);
-              console.log('[Gemini 分類助手] [對話提取] 圖片詳情:', images.map(img => ({
+              _log.debug(`[Gemini 分類助手] [對話提取] 模型回復包含 ${images.length} 張圖片`);
+              _log.debug('[Gemini 分類助手] [對話提取] 圖片詳情:', images.map(img => ({
                 url: img.url?.substring(0, 100),
                 hasDownloadButton: img.hasDownloadButton,
                 originalUrl: img.originalUrl?.substring(0, 100)
               })));
             } else {
               // 如果沒有找到圖片，記錄一下以便調試
-              console.log('[Gemini 分類助手] [對話提取] 模型回復未找到圖片，元素標籤:', element.tagName, 'class:', element.className?.substring(0, 100));
+              _log.debug('[Gemini 分類助手] [對話提取] 模型回復未找到圖片，元素標籤:', element.tagName, 'class:', element.className?.substring(0, 100));
               
               // 異步重試機制：偵測到文字回覆後的 1 秒、3 秒、5 秒分別進行一次『二次掃描』
               // 由於圖片是動態生成的，可能在文字回覆後才加載完成
               [1000, 3000, 5000].forEach((delay, index) => {
                 setTimeout(() => {
                   if (isRuntimeValid() && currentChatId) {
-                    console.log(`[Gemini 分類助手] [對話提取] 二次掃描 ${index + 1}/3 (${delay}ms 後) - 重新提取圖片`);
+                    _log.debug(`[Gemini 分類助手] [對話提取] 二次掃描 ${index + 1}/3 (${delay}ms 後) - 重新提取圖片`);
                     const retryImages = extractImages(element);
                     if (retryImages.length > 0) {
                       // 更新消息的圖片
@@ -4753,13 +4800,13 @@
                         );
                         if (!existingImg) {
                           message.images.push(newImg);
-                          console.log(`[Gemini 分類助手] [對話提取] 二次掃描找到新圖片:`, newImg.url?.substring(0, 100));
+                          _log.debug(`[Gemini 分類助手] [對話提取] 二次掃描找到新圖片:`, newImg.url?.substring(0, 100));
                         }
                       });
                       
                       // 【修正通訊崩潰】所有 sendMessage 前必須加上檢查，防止 context invalidated 錯誤
                       if (!chrome.runtime?.id) {
-                        console.warn('[Gemini 分類助手] 插件環境失效，請手動重新整理頁面');
+                        _log.warn('[Gemini 分類助手] 插件環境失效，請手動重新整理頁面');
                         return;
                       }
                       
@@ -4782,18 +4829,18 @@
             modelMessages.push(message);
           });
         } catch (e) {
-          console.warn(`[Gemini 分類助手] [對話提取] 選擇器 "${selector}" 查詢出錯:`, e.message);
+          _log.warn(`[Gemini 分類助手] [對話提取] 選擇器 "${selector}" 查詢出錯:`, e.message);
         }
       }
 
       // 策略 3: 如果上述方法沒找到，使用通用選擇器（按順序提取）
       if (userMessages.length === 0 && modelMessages.length === 0) {
-        console.log('[Gemini 分類助手] [對話提取] ⚠️ 策略 1 和 2 未找到消息，嘗試策略 3: 使用通用選擇器...');
-        console.log('[Gemini 分類助手] [對話提取] [調試] 分析頁面中所有可能的消息容器...');
+        _log.debug('[Gemini 分類助手] [對話提取] ⚠️ 策略 1 和 2 未找到消息，嘗試策略 3: 使用通用選擇器...');
+        _log.debug('[Gemini 分類助手] [對話提取] [調試] 分析頁面中所有可能的消息容器...');
         
         // 先分析頁面結構
         const allPossibleContainers = document.querySelectorAll('div, article, section, li');
-        console.log(`[Gemini 分類助手] [對話提取] [調試] 頁面中共有 ${allPossibleContainers.length} 個可能的容器元素`);
+        _log.debug(`[Gemini 分類助手] [對話提取] [調試] 頁面中共有 ${allPossibleContainers.length} 個可能的容器元素`);
         
         // 查找包含文本內容的容器
         const textContainers = Array.from(allPossibleContainers).filter(el => {
@@ -4801,12 +4848,12 @@
           return text.length > 10 && text.length < 10000; // 合理的消息長度
         });
         
-        console.log(`[Gemini 分類助手] [對話提取] [調試] 找到 ${textContainers.length} 個包含文本的容器`);
+        _log.debug(`[Gemini 分類助手] [對話提取] [調試] 找到 ${textContainers.length} 個包含文本的容器`);
         
         // 顯示前 10 個容器的信息
         textContainers.slice(0, 10).forEach((el, idx) => {
           const text = (el.innerText || el.textContent || '').trim();
-          console.log(`[Gemini 分類助手] [對話提取] [調試] 容器 #${idx + 1}:`, {
+          _log.debug(`[Gemini 分類助手] [對話提取] [調試] 容器 #${idx + 1}:`, {
             className: el.className?.substring(0, 100) || '(無類名)',
             tagName: el.tagName,
             textPreview: text.substring(0, 100),
@@ -4837,7 +4884,7 @@
             const elements = document.querySelectorAll(selector);
             if (elements.length === 0) continue;
             
-            console.log(`[Gemini 分類助手] [對話提取] 通用選擇器 "${selector}" 找到 ${elements.length} 個元素`);
+            _log.debug(`[Gemini 分類助手] [對話提取] 通用選擇器 "${selector}" 找到 ${elements.length} 個元素`);
             
             elements.forEach((element, index) => {
               const text = extractPlainText(element);
@@ -4880,7 +4927,7 @@
               }
               
               if (role === 'unknown') {
-                console.log(`[Gemini 分類助手] [對話提取] [調試] 無法判斷角色，跳過元素 #${index}:`, {
+                _log.debug(`[Gemini 分類助手] [對話提取] [調試] 無法判斷角色，跳過元素 #${index}:`, {
                   className: element.className?.substring(0, 100),
                   textPreview: text.substring(0, 50)
                 });
@@ -4904,19 +4951,19 @@
               
               if (role === 'user') {
                 userMessages.push(message);
-                console.log(`[Gemini 分類助手] [對話提取] [調試] ✓ 找到用戶消息 #${userMessages.length}:`, text.substring(0, 100));
+                _log.debug(`[Gemini 分類助手] [對話提取] [調試] ✓ 找到用戶消息 #${userMessages.length}:`, text.substring(0, 100));
               } else {
                 modelMessages.push(message);
-                console.log(`[Gemini 分類助手] [對話提取] [調試] ✓ 找到模型回復 #${modelMessages.length}:`, text.substring(0, 100));
+                _log.debug(`[Gemini 分類助手] [對話提取] [調試] ✓ 找到模型回復 #${modelMessages.length}:`, text.substring(0, 100));
               }
             });
             
             if (userMessages.length > 0 || modelMessages.length > 0) {
-              console.log(`[Gemini 分類助手] [對話提取] ✓ 策略 3 成功: 使用 "${selector}" 找到 ${userMessages.length} 條用戶消息和 ${modelMessages.length} 條模型回復`);
+              _log.debug(`[Gemini 分類助手] [對話提取] ✓ 策略 3 成功: 使用 "${selector}" 找到 ${userMessages.length} 條用戶消息和 ${modelMessages.length} 條模型回復`);
               break;
             }
           } catch (e) {
-            console.warn(`[Gemini 分類助手] [對話提取] 通用選擇器 "${selector}" 查詢出錯:`, e.message);
+            _log.warn(`[Gemini 分類助手] [對話提取] 通用選擇器 "${selector}" 查詢出錯:`, e.message);
             continue;
           }
         }
@@ -4938,20 +4985,20 @@
       });
       
       // 記錄排序後的消息數量
-      console.log('[Gemini 分類助手] [對話提取] 消息已按時間順序排列');
+      _log.debug('[Gemini 分類助手] [對話提取] 消息已按時間順序排列');
 
-      console.log('[Gemini 分類助手] [對話提取] ✓ 提取完成:', {
+      _log.debug('[Gemini 分類助手] [對話提取] ✓ 提取完成:', {
         用戶消息: userMessages.length,
         模型回復: modelMessages.length,
         總計: messages.length
       });
-      console.log('[Gemini 分類助手] [對話提取] 消息已按時間順序排列');
+      _log.debug('[Gemini 分類助手] [對話提取] 消息已按時間順序排列');
 
       // 如果有新消息，保存它們
       if (messages.length > 0) {
         // 確保有有效的 chatId
         if (!chatIdToUse) {
-          console.warn('[Gemini 分類助手] [對話提取] ⚠️ 沒有有效的對話 ID，無法保存消息');
+          _log.warn('[Gemini 分類助手] [對話提取] ⚠️ 沒有有效的對話 ID，無法保存消息');
           return messages; // 仍然返回消息，但不保存
         }
         
@@ -4972,7 +5019,7 @@
       handleAutoDownloadForGeneratedImages(newMessages);
 
         if (newMessages.length > 0) {
-          console.log('[Gemini 分類助手] [對話提取] 發現', newMessages.length, '條新消息，準備保存 (chatId:', chatIdToUse, ')');
+          _log.debug('[Gemini 分類助手] [對話提取] 發現', newMessages.length, '條新消息，準備保存 (chatId:', chatIdToUse, ')');
           
           // 通知 background.js 保存消息
           if (isRuntimeValid()) {
@@ -4982,7 +5029,7 @@
               userProfile: currentUserProfile || 'default'
             };
             
-            console.log('[Gemini 分類助手] [對話提取] 準備保存消息:', {
+            _log.debug('[Gemini 分類助手] [對話提取] 準備保存消息:', {
               chatId: chatIdToUse,
               messageCount: newMessages.length,
               userProfile: currentUserProfile || 'default'
@@ -4990,7 +5037,7 @@
 
             // 【修正通訊崩潰】所有 sendMessage 前必須加上檢查，防止 context invalidated 錯誤
             if (!chrome.runtime?.id) {
-              console.warn('[Gemini 分類助手] 插件環境失效，請手動重新整理頁面');
+              _log.warn('[Gemini 分類助手] 插件環境失效，請手動重新整理頁面');
               return;
             }
             
@@ -4999,12 +5046,12 @@
               data: data
             }, (response) => {
               if (chrome.runtime.lastError) {
-                console.error('[Gemini 分類助手] [對話提取] 發送消息失敗:', chrome.runtime.lastError.message);
+                _log.error('[Gemini 分類助手] [對話提取] 發送消息失敗:', chrome.runtime.lastError.message);
                 return;
               }
 
               if (response && response.status === 'ok') {
-                console.log('[Gemini 分類助手] [對話提取] ✓ 新消息已保存');
+                _log.debug('[Gemini 分類助手] [對話提取] ✓ 新消息已保存');
               }
             });
 
@@ -5018,20 +5065,20 @@
                 }).catch(() => {});
               }
             } catch (gapiError) {
-              console.warn('[Gemini 分類助手] [GAPI] 格式化失敗:', gapiError.message);
+              _log.warn('[Gemini 分類助手] [GAPI] 格式化失敗:', gapiError.message);
             }
           }
         }
       }
 
-      console.log('[Gemini 分類助手] [對話提取] ========== 提取完成 ==========');
+      _log.debug('[Gemini 分類助手] [對話提取] ========== 提取完成 ==========');
 
       // 【GAPI】返回符合 API 格式的數據（用於直接調用）
       const apiFormattedMessages = messages.map(msg => formatMessageForAPI(msg, chatIdToUse));
       return apiFormattedMessages;
     } catch (error) {
-      console.error('[Gemini 分類助手] [對話提取] ❌ 提取消息時發生錯誤:', error);
-      console.error('[Gemini 分類助手] [對話提取] 錯誤堆疊:', error.stack);
+      _log.error('[Gemini 分類助手] [對話提取] ❌ 提取消息時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [對話提取] 錯誤堆疊:', error.stack);
       return [];
     }
   }
@@ -5177,7 +5224,7 @@
                 if (bgUrl.includes('googleusercontent.com') && bgUrl.length > 200 && 
                     !bgUrl.includes('/profile/picture/') && 
                     !bgUrl.includes('profile/picture')) {
-                  console.log('[Gemini 分類助手] [強制提取] ✓ 從 button.image-button 的背景圖中提取到 URL:', bgUrl.substring(0, 100));
+                  _log.debug('[Gemini 分類助手] [強制提取] ✓ 從 button.image-button 的背景圖中提取到 URL:', bgUrl.substring(0, 100));
                   // 創建臨時 img 元素
                   const tempImg = document.createElement('img');
                   tempImg.src = bgUrl;
@@ -5187,7 +5234,7 @@
               }
             }
           } catch (error) {
-            console.error('[Gemini 分類助手] [強制提取] 提取背景圖時發生錯誤:', error);
+            _log.error('[Gemini 分類助手] [強制提取] 提取背景圖時發生錯誤:', error);
           }
         }
       });
@@ -5273,14 +5320,14 @@
           processedImageUrls.add(urlKey);
           
           foundValidImages++;
-          console.log('[Gemini 分類助手] [強制提取]   ✅ 發現生成圖 #' + foundValidImages + '（分數: ' + candidate.score + '）');
-          console.log('[Gemini 分類助手] [強制提取]      URL 長度:', src.length);
-          console.log('[Gemini 分類助手] [強制提取]      URL 預覽:', src.substring(0, 200));
+          _log.debug('[Gemini 分類助手] [強制提取]   ✅ 發現生成圖 #' + foundValidImages + '（分數: ' + candidate.score + '）');
+          _log.debug('[Gemini 分類助手] [強制提取]      URL 長度:', src.length);
+          _log.debug('[Gemini 分類助手] [強制提取]      URL 預覽:', src.substring(0, 200));
           
           // 【自動模式降溫】若 URL 不含 gg-dl 或 image_generation 關鍵字（代表只是 200K 的預覽圖），則不執行 triggerAutoDownload
           const isHighQualityImage = src.includes('gg-dl') || src.includes('rd-gg-dl') || src.includes('image_generation');
           if (!isHighQualityImage) {
-            console.log('[Gemini 分類助手] [強制提取]   ⏭️ 跳過：URL 不含 gg-dl 或 image_generation（可能是預覽圖）');
+            _log.debug('[Gemini 分類助手] [強制提取]   ⏭️ 跳過：URL 不含 gg-dl 或 image_generation（可能是預覽圖）');
             continue;
           }
           
@@ -5290,17 +5337,17 @@
           sendImageToSidePanel(src, requestId, img);
           triggerAutoDownload(src, requestId, null, 'highres', 'forceExtractRealImage');
         } catch (e) {
-          console.error('[Gemini 分類助手] [強制提取]   處理圖片時發生錯誤:', e);
+          _log.error('[Gemini 分類助手] [強制提取]   處理圖片時發生錯誤:', e);
         }
       }
       
       if (foundValidImages > 0) {
-        console.log('[Gemini 分類助手] [強制提取] 🔥 本次掃描共發現', foundValidImages, '張有效生成圖（已去重）');
+        _log.debug('[Gemini 分類助手] [強制提取] 🔥 本次掃描共發現', foundValidImages, '張有效生成圖（已去重）');
       } else if (candidateImages.length > 5) {
-        console.log('[Gemini 分類助手] [強制提取]   發現', candidateImages.length, '個候選圖片，但只處理前 5 個最優先的');
+        _log.debug('[Gemini 分類助手] [強制提取]   發現', candidateImages.length, '個候選圖片，但只處理前 5 個最優先的');
       }
     } catch (error) {
-      console.error('[Gemini 分類助手] [強制提取] ❌ 強制提取函數執行錯誤:', error);
+      _log.error('[Gemini 分類助手] [強制提取] ❌ 強制提取函數執行錯誤:', error);
     }
   }
   
@@ -5316,7 +5363,7 @@
       return;
     }
 
-    console.log('[Gemini 分類助手] [強制提取] 🔥 啟動強制提取定時器（每 5 秒掃描一次，暴力模式：不論有沒有對話 ID）');
+    _log.debug('[Gemini 分類助手] [強制提取] 🔥 啟動強制提取定時器（每 5 秒掃描一次，暴力模式：不論有沒有對話 ID）');
 
     // 立即執行一次
     forceExtractRealImage();
@@ -5325,7 +5372,7 @@
     timerManager.setInterval('forceExtract', () => {
       if (!isRuntimeValid()) {
         timerManager.clear('forceExtract');
-        console.log('[Gemini 分類助手] [強制提取] ⏹️ 停止強制提取定時器（上下文失效）');
+        _log.debug('[Gemini 分類助手] [強制提取] ⏹️ 停止強制提取定時器（上下文失效）');
         return;
       }
       forceExtractRealImage();
@@ -5335,7 +5382,7 @@
   // 停止強制提取定時器
   function stopForceExtractInterval() {
     timerManager.clear('forceExtract');
-    console.log('[Gemini 分類助手] [強制提取] ⏹️ 停止強制提取定時器');
+    _log.debug('[Gemini 分類助手] [強制提取] ⏹️ 停止強制提取定時器');
   }
   
   // 將圖片轉換為 Base64（破解 CSP 封鎖，不修改原始圖片）
@@ -5363,17 +5410,17 @@
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             
             const base64String = canvas.toDataURL('image/png');
-            console.log('[Gemini 分類助手] [Base64轉換] ✓ 圖片已轉換為 Base64 (大小:', (base64String.length / 1024).toFixed(2), 'KB)');
+            _log.debug('[Gemini 分類助手] [Base64轉換] ✓ 圖片已轉換為 Base64 (大小:', (base64String.length / 1024).toFixed(2), 'KB)');
             resolve(base64String);
           } catch (error) {
-            console.error('[Gemini 分類助手] [Base64轉換] Canvas 轉換失敗:', error);
+            _log.error('[Gemini 分類助手] [Base64轉換] Canvas 轉換失敗:', error);
             // 如果 Canvas 轉換失敗，回退到原始 URL
             resolve(imgElement.src || '');
           }
         };
         
         const handleError = () => {
-          console.error('[Gemini 分類助手] [Base64轉換] 圖片加載失敗，使用原始 URL');
+          _log.error('[Gemini 分類助手] [Base64轉換] 圖片加載失敗，使用原始 URL');
           // 如果加載失敗，使用原始 URL（不轉換為 Base64）
           resolve(imgElement.src || '');
         };
@@ -5400,7 +5447,7 @@
           }
         }
       } catch (error) {
-        console.error('[Gemini 分類助手] [Base64轉換] 轉換過程發生錯誤:', error);
+        _log.error('[Gemini 分類助手] [Base64轉換] 轉換過程發生錯誤:', error);
         // 如果轉換失敗，回退到原始 URL
         resolve(imgElement.src || '');
       }
@@ -5422,20 +5469,20 @@
           (url.includes('gg-dl') || url.includes('rd-gg-dl') || url.includes('image_generation'))
         );
         if (googleUrl) {
-          console.log('[Gemini 分類助手] [下載按鈕] ✓ 從 jslog 提取到真實圖片 URL:', googleUrl.substring(0, 100));
+          _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 從 jslog 提取到真實圖片 URL:', googleUrl.substring(0, 100));
           return googleUrl;
         }
         // 如果沒有找到 Google URL，使用第一個匹配的 URL
-        console.log('[Gemini 分類助手] [下載按鈕] ✓ 從 jslog 提取到 URL:', urlMatches[0].substring(0, 100));
+        _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 從 jslog 提取到 URL:', urlMatches[0].substring(0, 100));
         return urlMatches[0];
       }
       
       // 如果 jslog 中沒有 URL，嘗試模擬點擊按鈕（可能會觸發下載或顯示 URL）
       // 注意：模擬點擊可能不會立即返回 URL，所以這裡主要依賴 jslog 提取
-      console.log('[Gemini 分類助手] [下載按鈕] ⚠️ jslog 中未找到圖片 URL');
+      _log.debug('[Gemini 分類助手] [下載按鈕] ⚠️ jslog 中未找到圖片 URL');
       return null;
     } catch (error) {
-      console.error('[Gemini 分類助手] [下載按鈕] 提取 URL 時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [下載按鈕] 提取 URL 時發生錯誤:', error);
       return null;
     }
   }
@@ -5453,7 +5500,7 @@
           !originalSrc.includes('profile-picture') &&
           !originalSrc.includes('avatar') &&
           (originalSrc.includes('googleusercontent.com') || originalSrc.startsWith('blob:'))) {
-        console.log('[Gemini 分類助手] [佔位符監聽] 圖片 URL 已有效，無需等待');
+        _log.debug('[Gemini 分類助手] [佔位符監聽] 圖片 URL 已有效，無需等待');
         resolve(originalSrc);
         return;
       }
@@ -5473,7 +5520,7 @@
                 !newSrc.includes('profile-picture') &&
                 !newSrc.includes('avatar') &&
                 (newSrc.includes('googleusercontent.com') || (newSrc.startsWith('blob:') && !newSrc.startsWith('blob:null/')))) {
-              console.log('[Gemini 分類助手] [佔位符監聽] ✓ 檢測到有效圖片 URL:', newSrc.substring(0, 100));
+              _log.debug('[Gemini 分類助手] [佔位符監聽] ✓ 檢測到有效圖片 URL:', newSrc.substring(0, 100));
               observerManager.disconnect(imgSrcWaitName);
               resolve(newSrc);
             }
@@ -5481,7 +5528,7 @@
         });
 
         if (Date.now() - startTime > timeout) {
-          console.log('[Gemini 分類助手] [佔位符監聽] ⏱️ 等待超時，使用當前 URL');
+          _log.debug('[Gemini 分類助手] [佔位符監聽] ⏱️ 等待超時，使用當前 URL');
           observerManager.disconnect(imgSrcWaitName);
           resolve(imgElement.src || imgElement.getAttribute('src') || originalSrc);
         }
@@ -5496,7 +5543,7 @@
       setTimeout(() => {
         observerManager.disconnect(imgSrcWaitName);
         const currentSrc = imgElement.src || imgElement.getAttribute('src') || originalSrc;
-        console.log('[Gemini 分類助手] [佔位符監聽] ⏱️ 超時結束，當前 URL:', currentSrc.substring(0, 100));
+        _log.debug('[Gemini 分類助手] [佔位符監聽] ⏱️ 超時結束，當前 URL:', currentSrc.substring(0, 100));
         resolve(currentSrc);
       }, timeout);
     });
@@ -5508,7 +5555,7 @@
       const startTime = Date.now();
       const originalSrc = imgElement.src || imgElement.getAttribute('src') || '';
       
-      console.log('[Gemini 分類助手] [圖片監聽] 開始監聽圖片 src 變化:', originalSrc.substring(0, 100));
+      _log.debug('[Gemini 分類助手] [圖片監聽] 開始監聽圖片 src 變化:', originalSrc.substring(0, 100));
       
       // 如果已經是有效的圖片 URL（不是佔位符），立即返回
       if (originalSrc && 
@@ -5517,7 +5564,7 @@
           !originalSrc.includes('profile-picture') &&
           !originalSrc.includes('avatar') &&
           (originalSrc.includes('googleusercontent.com') || originalSrc.startsWith('blob:'))) {
-        console.log('[Gemini 分類助手] [圖片監聽] 圖片 URL 已有效，無需等待');
+        _log.debug('[Gemini 分類助手] [圖片監聽] 圖片 URL 已有效，無需等待');
         resolve(originalSrc);
         return;
       }
@@ -5537,7 +5584,7 @@
                 !newSrc.includes('profile-picture') &&
                 !newSrc.includes('avatar') &&
                 (newSrc.includes('googleusercontent.com') || (newSrc.startsWith('blob:') && !newSrc.startsWith('blob:null/')))) {
-              console.log('[Gemini 分類助手] [圖片監聽] ✓ 檢測到有效圖片 URL:', newSrc.substring(0, 100));
+              _log.debug('[Gemini 分類助手] [圖片監聽] ✓ 檢測到有效圖片 URL:', newSrc.substring(0, 100));
               observerManager.disconnect(imgPlaceholderName);
 
               sendImageToSidePanel(newSrc, currentMessageId, imgElement);
@@ -5557,7 +5604,7 @@
       const timeoutId = setTimeout(() => {
         observerManager.disconnect(imgPlaceholderName);
         const currentSrc = imgElement.src || imgElement.getAttribute('src') || originalSrc;
-        console.log('[Gemini 分類助手] [圖片監聽] ⏱️ 10 秒超時，當前 URL:', currentSrc.substring(0, 100));
+        _log.debug('[Gemini 分類助手] [圖片監聽] ⏱️ 10 秒超時，當前 URL:', currentSrc.substring(0, 100));
         
         // 如果 10 秒後 src 仍未改變，嘗試抓取同層級的 <download-generated-image-button> 中的連結
         if (currentSrc === originalSrc || currentSrc.includes('/profile/') || currentSrc.includes('/picture/')) {
@@ -5594,7 +5641,7 @@
   // 監控圖片載入：當圖片從佔位符變更為真實路徑時自動下載
   function observeImageLoading(container, messageId) {
     try {
-      console.log('[Gemini 分類助手] [圖片監控] 開始監控圖片載入...');
+      _log.debug('[Gemini 分類助手] [圖片監控] 開始監控圖片載入...');
       
       // 使用更寬鬆的選擇器查找圖片
       let img = container.querySelector('button.image-button img.image.loaded');
@@ -5618,13 +5665,13 @@
       }
       
       if (!img) {
-        console.log('[Gemini 分類助手] [圖片監控] ⚠️ 未找到任何圖片元素');
-        console.log('[Gemini 分類助手] [圖片監控]   嘗試搜索的容器:', container.tagName, container.className?.substring(0, 50));
+        _log.debug('[Gemini 分類助手] [圖片監控] ⚠️ 未找到任何圖片元素');
+        _log.debug('[Gemini 分類助手] [圖片監控]   嘗試搜索的容器:', container.tagName, container.className?.substring(0, 50));
         return;
       }
       
-      console.log('[Gemini 分類助手] [圖片監控]   ✓ 找到圖片元素');
-      console.log('[Gemini 分類助手] [圖片監控]   img.className:', img.className);
+      _log.debug('[Gemini 分類助手] [圖片監控]   ✓ 找到圖片元素');
+      _log.debug('[Gemini 分類助手] [圖片監控]   img.className:', img.className);
       
       const __monRegistry = window.__GAPI_SiteRegistry;
       const __monAdapter = __monRegistry ? __monRegistry.getCurrentAdapter() : null;
@@ -5635,13 +5682,13 @@
         if (extractedId) requestId = extractedId;
       }
       
-      console.log('[Gemini 分類助手] [圖片監控]   ✓ 找到圖片元素');
-      console.log('[Gemini 分類助手] [圖片監控]   requestId:', requestId);
-      console.log('[Gemini 分類助手] [圖片監控]   當前 src:', img.src?.substring(0, 100) || '無');
+      _log.debug('[Gemini 分類助手] [圖片監控]   ✓ 找到圖片元素');
+      _log.debug('[Gemini 分類助手] [圖片監控]   requestId:', requestId);
+      _log.debug('[Gemini 分類助手] [圖片監控]   當前 src:', img.src?.substring(0, 100) || '無');
       
       // 如果已經是有效圖片，立即下載
       if (img.src && !img.src.includes('profile/picture') && !img.src.includes('/profile/')) {
-        console.log('[Gemini 分類助手] [圖片監控]   ✅ 圖片已經是有效 URL，立即下載');
+        _log.debug('[Gemini 分類助手] [圖片監控]   ✅ 圖片已經是有效 URL，立即下載');
         triggerAutoDownload(img.src, requestId, null, 'highres', 'observeImageLoading_immediate');
         return;
       }
@@ -5652,15 +5699,15 @@
         mutations.forEach((mutation) => {
           if (mutation.attributeName === 'src') {
             const currentSrc = img.src;
-            console.log('[Gemini 分類助手] [圖片監控]   📍 src 屬性已變更:', currentSrc?.substring(0, 100) || '無');
+            _log.debug('[Gemini 分類助手] [圖片監控]   📍 src 屬性已變更:', currentSrc?.substring(0, 100) || '無');
 
             if (currentSrc && !currentSrc.includes('profile/picture') && !currentSrc.includes('/profile/')) {
-              console.log('[Gemini 分類助手] [圖片監控]   ✅ 真實圖片已現身！啟動下載程序...');
-              console.log('[Gemini 分類助手] [圖片監控]   完整 URL:', currentSrc.substring(0, 150));
+              _log.debug('[Gemini 分類助手] [圖片監控]   ✅ 真實圖片已現身！啟動下載程序...');
+              _log.debug('[Gemini 分類助手] [圖片監控]   完整 URL:', currentSrc.substring(0, 150));
               triggerAutoDownload(currentSrc, requestId, null, 'highres', 'observeImageLoading_srcChange');
               sendImageToSidePanel(currentSrc, messageId || requestId, img);
               observerManager.disconnect(imgLoadName);
-              console.log('[Gemini 分類助手] [圖片監控]   ✓ 監控已停止（圖片已下載）');
+              _log.debug('[Gemini 分類助手] [圖片監控]   ✓ 監控已停止（圖片已下載）');
             }
           }
         });
@@ -5671,16 +5718,16 @@
         attributeFilter: ['src', 'data-src']
       });
 
-      console.log('[Gemini 分類助手] [圖片監控]   ✓ MutationObserver 已啟動，等待圖片載入...');
+      _log.debug('[Gemini 分類助手] [圖片監控]   ✓ MutationObserver 已啟動，等待圖片載入...');
 
       // 設置超時（30秒後自動停止監控）
       setTimeout(() => {
         observerManager.disconnect(imgLoadName);
-        console.log('[Gemini 分類助手] [圖片監控]   ⏱️ 30 秒超時，停止監控');
+        _log.debug('[Gemini 分類助手] [圖片監控]   ⏱️ 30 秒超時，停止監控');
       }, 30000);
       
     } catch (error) {
-      console.error('[Gemini 分類助手] [圖片監控] ❌ 監控圖片載入時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [圖片監控] ❌ 監控圖片載入時發生錯誤:', error);
     }
   }
   
@@ -5701,7 +5748,7 @@
   async function checkImageSizeAndDownload(imageData) {
     try {
       if (!imageData.url) {
-        console.warn('[Gemini 分類助手] [圖片分級] 沒有圖片 URL，跳過');
+        _log.warn('[Gemini 分類助手] [圖片分級] 沒有圖片 URL，跳過');
         return;
       }
 
@@ -5721,10 +5768,10 @@
       if (isHighRes) {
         // 高畫質原圖（含 =s0，原始尺寸）：檢查資料庫，若未下載過則執行下載
         // 注意：=s0 代表原始尺寸，但實際文件大小可能從幾百 KB 到 7MB+ 不等，取決於圖片內容複雜度
-        console.log('[Gemini 分類助手] [圖片分級] 🔍 檢測到高畫質原圖（含 =s0，原始尺寸）');
+        _log.debug('[Gemini 分類助手] [圖片分級] 🔍 檢測到高畫質原圖（含 =s0，原始尺寸）');
         const checkResult = await checkDownloadHistory(imageUrl, requestId, currentChatId);
         if (checkResult.exists) {
-          console.log('[Gemini 分類助手] [圖片分級] ⏭️ 高畫質原圖已下載過，跳過');
+          _log.debug('[Gemini 分類助手] [圖片分級] ⏭️ 高畫質原圖已下載過，跳過');
           return;
         }
         
@@ -5733,23 +5780,23 @@
         const requestIdShort = requestId ? requestId.substring(0, 20) : Date.now().toString();
         const filename = `${requestIdShort}_${Date.now()}.png`;
         
-        console.log('[Gemini 分類助手] [圖片分級] ✅ 開始下載高畫質原圖');
+        _log.debug('[Gemini 分類助手] [圖片分級] ✅ 開始下載高畫質原圖');
         await triggerAutoDownload(imageUrl, requestId, filename, 'highres', 'checkImageSizeAndDownload_highres');
       } else {
         // 小尺寸預覽圖（不含 =s0，約 200K）：僅限一張
-        console.log('[Gemini 分類助手] [圖片分級] 🔍 檢測到小尺寸預覽圖（不含 =s0）');
+        _log.debug('[Gemini 分類助手] [圖片分級] 🔍 檢測到小尺寸預覽圖（不含 =s0）');
         
         // 檢查該對話是否已保存預覽圖
         const hasThumbnail = await hasThumbnailSaved(currentChatId);
         if (hasThumbnail) {
-          console.log('[Gemini 分類助手] [圖片分級] ⏭️ 該對話已保存預覽圖，跳過');
+          _log.debug('[Gemini 分類助手] [圖片分級] ⏭️ 該對話已保存預覽圖，跳過');
           return;
         }
         
         // 檢查資料庫，若未下載過則執行下載
         const checkResult = await checkDownloadHistory(imageUrl, requestId, currentChatId);
         if (checkResult.exists) {
-          console.log('[Gemini 分類助手] [圖片分級] ⏭️ 預覽圖已下載過，跳過');
+          _log.debug('[Gemini 分類助手] [圖片分級] ⏭️ 預覽圖已下載過，跳過');
           return;
         }
         
@@ -5758,14 +5805,14 @@
         const requestIdShort = requestId ? requestId.substring(0, 20) : Date.now().toString();
         const filename = `thumbnail_${requestIdShort}_${Date.now()}.png`;
         
-        console.log('[Gemini 分類助手] [圖片分級] ✅ 開始下載預覽圖（僅限一張）');
+        _log.debug('[Gemini 分類助手] [圖片分級] ✅ 開始下載預覽圖（僅限一張）');
         await triggerAutoDownload(imageUrl, requestId, filename, 'thumbnail', 'checkImageSizeAndDownload_thumbnail');
         
         // 標記該對話已保存預覽圖
         await markThumbnailSaved(currentChatId);
       }
     } catch (error) {
-      console.error('[Gemini 分類助手] [圖片分級] 檢查大小時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [圖片分級] 檢查大小時發生錯誤:', error);
     }
   }
 
@@ -5773,7 +5820,7 @@
   // source: 來源標識，用於追蹤是哪個函數觸發的下載
   async function processImageDownload(imageUrl, requestId, filename, imageType = 'highres', source = 'unknown') {
     if (!imageUrl) {
-      console.error('[Gemini 分類助手] [圖片處理] ❌ 圖片 URL 為空');
+      _log.error('[Gemini 分類助手] [圖片處理] ❌ 圖片 URL 為空');
       return { processed: false, reason: 'empty_url' };
     }
     
@@ -5782,7 +5829,7 @@
     
     // 【立即檢查內存緩存】防止並發調用
     if (!isManual && processedImageUrls.has(urlKey)) {
-      console.log('[Gemini 分類助手] [圖片處理] ⏭️ 跳過重複下載（內存緩存）:', urlKey.substring(0, 100), '來源:', source);
+      _log.debug('[Gemini 分類助手] [圖片處理] ⏭️ 跳過重複下載（內存緩存）:', urlKey.substring(0, 100), '來源:', source);
       return { processed: false, reason: 'memory_cache' };
     }
     
@@ -5790,7 +5837,7 @@
     if (!isManual) {
       const checkResult = await checkDownloadHistory(imageUrl, urlKey, currentChatId);
       if (checkResult.exists) {
-        console.log('[Gemini 分類助手] [圖片處理] ⏭️ 跳過重複下載（資料庫檢查）:', urlKey.substring(0, 100), '類型:', checkResult.type, '來源:', source);
+        _log.debug('[Gemini 分類助手] [圖片處理] ⏭️ 跳過重複下載（資料庫檢查）:', urlKey.substring(0, 100), '類型:', checkResult.type, '來源:', source);
         return { processed: false, reason: 'database', type: checkResult.type };
       }
     }
@@ -5846,7 +5893,7 @@
     }
 
     if (!imageUrl) {
-      console.error('[Gemini 分類助手] [自動下載] ❌ 圖片 URL 為空');
+      _log.error('[Gemini 分類助手] [自動下載] ❌ 圖片 URL 為空');
       return;
     }
 
@@ -5857,7 +5904,7 @@
     
     // 【過濾無效 URL】跳過 blob:null/ 開頭的無效 URL
     if (imageUrl && typeof imageUrl === 'string' && imageUrl.startsWith('blob:null/')) {
-      // console.log('[Gemini 分類助手] [自動下載] ⏭️ 跳過無效的 blob:null URL:', imageUrl.substring(0, 50)); // 已禁用，避免大量日誌
+      // _log.debug('[Gemini 分類助手] [自動下載] ⏭️ 跳過無效的 blob:null URL:', imageUrl.substring(0, 50)); // 已禁用，避免大量日誌
       return;
     }
     
@@ -5882,7 +5929,7 @@
     } else {
       // 【立即檢查內存緩存】防止並發調用（這裡應該已經在 processImageDownload 中檢查過了，但為了安全還是再檢查一次）
       if (processedImageUrls.has(urlKey)) {
-        console.log('[Gemini 分類助手] [自動下載] ⏭️ 跳過重複下載（內存緩存）:', urlKey.substring(0, 100));
+        _log.debug('[Gemini 分類助手] [自動下載] ⏭️ 跳過重複下載（內存緩存）:', urlKey.substring(0, 100));
         return;
       }
       
@@ -5895,7 +5942,7 @@
     if (!isManual) {
       const checkResult = await checkDownloadHistory(imageUrl, urlKey, currentChatId);
       if (checkResult.exists) {
-        console.log('[Gemini 分類助手] [自動下載] ⏭️ 跳過重複下載（資料庫檢查）:', urlKey.substring(0, 100), '類型:', checkResult.type);
+        _log.debug('[Gemini 分類助手] [自動下載] ⏭️ 跳過重複下載（資料庫檢查）:', urlKey.substring(0, 100), '類型:', checkResult.type);
         // 從內存緩存中移除，允許重試（如果資料庫記錄有問題）
         processedImageUrls.delete(urlKey);
         return;
@@ -5911,7 +5958,7 @@
     
     // 【過濾 unnamed 格式】如果檔名包含 "unnamed"，跳過下載（優先選擇另一種命名格式）
     if (filename && (filename.toLowerCase().includes('unnamed') || filename.includes('未命名'))) {
-      console.log('[Gemini 分類助手] [自動下載] ⏭️ 跳過 unnamed 格式的檔案:', filename);
+      _log.debug('[Gemini 分類助手] [自動下載] ⏭️ 跳過 unnamed 格式的檔案:', filename);
       // 從內存緩存中移除，允許其他格式的下載
       if (!isManual) {
         processedImageUrls.delete(urlKey);
@@ -5926,7 +5973,7 @@
 
     // 【修正通訊崩潰】所有 sendMessage 前必須加上檢查，防止 context invalidated 錯誤
     if (!chrome.runtime?.id) {
-      console.warn('[Gemini 分類助手] 插件環境失效，請手動重新整理頁面');
+      _log.warn('[Gemini 分類助手] 插件環境失效，請手動重新整理頁面');
       return;
     }
     
@@ -6011,12 +6058,12 @@
   // 嘗試從下載按鈕提取圖片 URL（防錯處理）
   async function tryExtractFromDownloadButton(imgElement, currentMessageId) {
     try {
-      console.log('[Gemini 分類助手] [下載按鈕] 嘗試從同層級的 download-generated-image-button 提取連結');
+      _log.debug('[Gemini 分類助手] [下載按鈕] 嘗試從同層級的 download-generated-image-button 提取連結');
       
       // 查找同層級或父級中的 download-generated-image-button
       const parentContainer = imgElement.closest('[class*="image-button"], [class*="response"], [class*="model-response"], [data-role="model"], [data-role="assistant"]');
       if (!parentContainer) {
-        console.log('[Gemini 分類助手] [下載按鈕] ⚠️ 未找到父容器');
+        _log.debug('[Gemini 分類助手] [下載按鈕] ⚠️ 未找到父容器');
         return null;
       }
       
@@ -6042,11 +6089,11 @@
       }
       
       if (!downloadButton) {
-        console.log('[Gemini 分類助手] [下載按鈕] ⚠️ 未找到 download-generated-image-button');
+        _log.debug('[Gemini 分類助手] [下載按鈕] ⚠️ 未找到 download-generated-image-button');
         return null;
       }
       
-      console.log('[Gemini 分類助手] [下載按鈕] ✓ 找到下載按鈕:', {
+      _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 找到下載按鈕:', {
         tagName: downloadButton.tagName,
         dataTestId: downloadButton.getAttribute('data-test-id'),
         ariaLabel: downloadButton.getAttribute('aria-label'),
@@ -6066,7 +6113,7 @@
           );
           
           if (googleUrl) {
-            console.log('[Gemini 分類助手] [下載按鈕] ✓ 從 jslog 提取到 URL:', googleUrl.substring(0, 100));
+            _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 從 jslog 提取到 URL:', googleUrl.substring(0, 100));
             sendImageToSidePanel(googleUrl, currentMessageId, imgElement);
             return googleUrl;
           }
@@ -6078,17 +6125,17 @@
                       downloadButton.getAttribute('data-image-url') ||
                       downloadButton.getAttribute('data-download-url');
       if (dataUrl && dataUrl.includes('googleusercontent.com')) {
-        console.log('[Gemini 分類助手] [下載按鈕] ✓ 從數據屬性提取到 URL:', dataUrl.substring(0, 100));
+        _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 從數據屬性提取到 URL:', dataUrl.substring(0, 100));
         sendImageToSidePanel(dataUrl, currentMessageId, imgElement);
         return dataUrl;
       }
       
       // 策略 3: 虛擬點擊按鈕，攔截下載請求
-      console.log('[Gemini 分類助手] [下載按鈕] 🔄 嘗試通過虛擬點擊獲取下載 URL...');
+      _log.debug('[Gemini 分類助手] [下載按鈕] 🔄 嘗試通過虛擬點擊獲取下載 URL...');
       return await extractUrlByVirtualClick(downloadButton, imgElement, currentMessageId);
       
     } catch (error) {
-      console.error('[Gemini 分類助手] [下載按鈕] 提取 URL 時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [下載按鈕] 提取 URL 時發生錯誤:', error);
       return null;
     }
   }
@@ -6100,7 +6147,7 @@
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          console.log('[Gemini 分類助手] [下載按鈕] ⏰ 虛擬點擊超時，未獲取到 URL');
+          _log.debug('[Gemini 分類助手] [下載按鈕] ⏰ 虛擬點擊超時，未獲取到 URL');
           resolve(null);
         }
       }, 5000); // 5 秒超時
@@ -6115,7 +6162,7 @@
         if (typeof url === 'string' && url.includes('googleusercontent.com') && 
             (url.includes('gg-dl') || url.includes('rd-gg-dl') || url.includes('image_generation'))) {
           interceptedUrl = url;
-          console.log('[Gemini 分類助手] [下載按鈕] ✓ 攔截到 fetch 請求:', url.substring(0, 100));
+          _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 攔截到 fetch 請求:', url.substring(0, 100));
           if (!resolved) {
             resolved = true;
             clearTimeout(timeout);
@@ -6132,7 +6179,7 @@
         if (typeof url === 'string' && url.includes('googleusercontent.com') && 
             (url.includes('gg-dl') || url.includes('rd-gg-dl') || url.includes('image_generation'))) {
           interceptedUrl = url;
-          console.log('[Gemini 分類助手] [下載按鈕] ✓ 攔截到 XHR 請求:', url.substring(0, 100));
+          _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 攔截到 XHR 請求:', url.substring(0, 100));
           if (!resolved) {
             resolved = true;
             clearTimeout(timeout);
@@ -6167,7 +6214,7 @@
                     observerManager.disconnect(menuInterceptName);
                     window.fetch = originalFetch;
                     XMLHttpRequest.prototype.open = originalXHROpen;
-                    console.log('[Gemini 分類助手] [下載按鈕] ✓ 從菜單中提取到 URL:', href.substring(0, 100));
+                    _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 從菜單中提取到 URL:', href.substring(0, 100));
                     sendImageToSidePanel(href, currentMessageId, imgElement);
                     resolve(href);
                   }
@@ -6188,9 +6235,9 @@
         button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
         button.click();
         
-        console.log('[Gemini 分類助手] [下載按鈕] ✓ 已執行虛擬點擊，等待攔截下載請求...');
+        _log.debug('[Gemini 分類助手] [下載按鈕] ✓ 已執行虛擬點擊，等待攔截下載請求...');
       } catch (error) {
-        console.error('[Gemini 分類助手] [下載按鈕] ❌ 虛擬點擊失敗:', error);
+        _log.error('[Gemini 分類助手] [下載按鈕] ❌ 虛擬點擊失敗:', error);
         if (!resolved) {
           resolved = true;
           clearTimeout(timeout);
@@ -6207,7 +6254,7 @@
   function downloadImageLocally(imageData) {
     try {
       if (!imageData.url && !imageData.base64) {
-        console.error('[Gemini 分類助手] [自動下載] 沒有可下載的圖片 URL 或 Base64');
+        _log.error('[Gemini 分類助手] [自動下載] 沒有可下載的圖片 URL 或 Base64');
         return;
       }
 
@@ -6243,9 +6290,9 @@
           // 清理 URL
           setTimeout(() => URL.revokeObjectURL(url), 100);
           
-          console.log('[Gemini 分類助手] [自動下載] ✓ Base64 圖片已下載:', filename);
+          _log.debug('[Gemini 分類助手] [自動下載] ✓ Base64 圖片已下載:', filename);
         } catch (error) {
-          console.error('[Gemini 分類助手] [自動下載] Base64 轉換失敗:', error);
+          _log.error('[Gemini 分類助手] [自動下載] Base64 轉換失敗:', error);
           // 如果 Base64 轉換失敗，嘗試使用 URL
           if (imageData.url) {
             const a = document.createElement('a');
@@ -6267,10 +6314,10 @@
         a.click();
         document.body.removeChild(a);
         
-        console.log('[Gemini 分類助手] [自動下載] ✓ 圖片 URL 已觸發下載:', imageData.url.substring(0, 100));
+        _log.debug('[Gemini 分類助手] [自動下載] ✓ 圖片 URL 已觸發下載:', imageData.url.substring(0, 100));
       }
     } catch (error) {
-      console.error('[Gemini 分類助手] [自動下載] 下載過程發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [自動下載] 下載過程發生錯誤:', error);
     }
   }
 
@@ -6286,7 +6333,7 @@
       const chatId = imageData.chatId || currentChatId;
       
       if (!chatId) {
-        console.error('[Gemini 分類助手] [圖片記錄] 缺少 chatId，無法保存');
+        _log.error('[Gemini 分類助手] [圖片記錄] 缺少 chatId，無法保存');
         return;
       }
 
@@ -6321,15 +6368,15 @@
         }
       }, (response) => {
         if (chrome.runtime.lastError) {
-          console.error('[Gemini 分類助手] [圖片記錄] 保存失敗:', chrome.runtime.lastError.message);
+          _log.error('[Gemini 分類助手] [圖片記錄] 保存失敗:', chrome.runtime.lastError.message);
           return;
         }
         if (response && response.status === 'ok') {
-          console.log('[Gemini 分類助手] [圖片記錄] ✓ 圖片路徑已記錄到數據庫');
+          _log.debug('[Gemini 分類助手] [圖片記錄] ✓ 圖片路徑已記錄到數據庫');
         }
       });
     } catch (error) {
-      console.error('[Gemini 分類助手] [圖片記錄] 記錄過程發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [圖片記錄] 記錄過程發生錯誤:', error);
     }
   }
 
@@ -6342,7 +6389,7 @@
     
     // 【過濾無效 URL】跳過 blob:null/ 開頭的無效 URL
     if (imageUrl && typeof imageUrl === 'string' && imageUrl.startsWith('blob:null/')) {
-      // console.log('[Gemini 分類助手] [圖片過濾] ⏭️ 跳過無效的 blob:null URL:', imageUrl.substring(0, 50)); // 已禁用，避免大量日誌
+      // _log.debug('[Gemini 分類助手] [圖片過濾] ⏭️ 跳過無效的 blob:null URL:', imageUrl.substring(0, 50)); // 已禁用，避免大量日誌
       return;
     }
     
@@ -6366,7 +6413,7 @@
         height: imgElement ? (imgElement.naturalHeight || imgElement.height || null) : null
       };
       
-      console.log('[Gemini 分類助手] [圖片發送] ✓ 發送圖片到 Side Panel:', {
+      _log.debug('[Gemini 分類助手] [圖片發送] ✓ 發送圖片到 Side Panel:', {
         id: imageData.id.substring(0, 30),
         requestId: currentMessageId ? currentMessageId.substring(0, 30) : '無',
         url: imageUrl.substring(0, 80)
@@ -6374,16 +6421,16 @@
       
       // 1. 記錄圖片路徑到數據庫
       recordImagePath(imageData).then(() => {
-        console.log('[Gemini 分類助手] [圖片記錄] ✓ 圖片已記錄');
+        _log.debug('[Gemini 分類助手] [圖片記錄] ✓ 圖片已記錄');
       }).catch(err => {
-        console.error('[Gemini 分類助手] [圖片記錄] 記錄失敗:', err);
+        _log.error('[Gemini 分類助手] [圖片記錄] 記錄失敗:', err);
       });
       
       // 2. 檢查圖片大小並下載（只有大於100KB的才下載）
       try {
         checkImageSizeAndDownload(imageData);
       } catch (error) {
-        console.error('[Gemini 分類助手] [自動下載] 下載失敗:', error);
+        _log.error('[Gemini 分類助手] [自動下載] 下載失敗:', error);
       }
       
       // 【修正通訊崩潰】所有 sendMessage 前必須加上檢查，防止 context invalidated 錯誤
@@ -6398,15 +6445,15 @@
         data: [imageData]
       }, (response) => {
         if (chrome.runtime.lastError) {
-          console.error('[Gemini 分類助手] [圖片發送] 發送失敗:', chrome.runtime.lastError.message);
+          _log.error('[Gemini 分類助手] [圖片發送] 發送失敗:', chrome.runtime.lastError.message);
           return;
         }
         if (response && response.status === 'ok') {
-          console.log('[Gemini 分類助手] [圖片發送] ✓ 圖片已成功傳送到 Side Panel');
+          _log.debug('[Gemini 分類助手] [圖片發送] ✓ 圖片已成功傳送到 Side Panel');
         }
       });
     } catch (error) {
-      console.error('[Gemini 分類助手] [圖片發送] 發送過程發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [圖片發送] 發送過程發生錯誤:', error);
     }
   }
 
@@ -6414,7 +6461,7 @@
   // 【暴力修正版】getRealImagePath：無視 ID 限制，只要發現 lh3.googleusercontent.com 或 blob: 就視為生成圖
   function getRealImagePath(container, isManualClick = false) {
     try {
-      console.log('[Gemini 分類助手] [圖片追蹤] 🔥 暴力模式：開始鎖定真實路徑...');
+      _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 暴力模式：開始鎖定真實路徑...');
       
       // 1. 暴力搜索：查找所有可能的圖片元素（不限制類名）
       const img = container.querySelector('button.image-button img') || 
@@ -6422,7 +6469,7 @@
                   container.querySelector('img');
 
       if (!img) {
-        console.log('[Gemini 分類助手] [圖片追蹤] ⚠️ 未找到圖片元素');
+        _log.debug('[Gemini 分類助手] [圖片追蹤] ⚠️ 未找到圖片元素');
         return null;
       }
 
@@ -6432,12 +6479,12 @@
       // - 如果 src 字串長度小於 200，絕對不要抓取（真正的原圖路徑很長）
       // - 如果包含 /profile/picture/，絕對不要抓取
       if (currentSrc.length < 200) {
-        console.log('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過：src 長度 < 200（長度：' + currentSrc.length + '），可能不是真正的原圖');
+        _log.debug('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過：src 長度 < 200（長度：' + currentSrc.length + '），可能不是真正的原圖');
         return null;
       }
       
       if (currentSrc.includes('/profile/picture/') || currentSrc.includes('profile/picture') || currentSrc.includes('/picture/')) {
-        console.log('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過：偵測到 /profile/picture/ 佔位符');
+        _log.debug('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過：偵測到 /profile/picture/ 佔位符');
         return null;
       }
 
@@ -6447,7 +6494,7 @@
         // 檢查是否是真正的圖片 URL（長度足夠）還是佔位符
         // 如果 URL 中包含 "/r_" 且沒有包含 "gg-dl" 或 "rd-gg-dl"，很可能是佔位符
         if (!currentSrc.includes('gg-dl') && !currentSrc.includes('rd-gg-dl') && !currentSrc.includes('image_generation')) {
-          console.log('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過：偵測到 "r_" 佔位符 URL（gemini-image-r_ 類型）');
+          _log.debug('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過：偵測到 "r_" 佔位符 URL（gemini-image-r_ 類型）');
           return null;
         }
       }
@@ -6462,14 +6509,14 @@
                                  currentSrc.includes('/rd-gg-dl/'));
 
       if (!isGeneratedImage) {
-        console.log('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過：不符合生成圖條件（缺少關鍵詞：gg-dl, rd-gg-dl, image_generation）');
+        _log.debug('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過：不符合生成圖條件（缺少關鍵詞：gg-dl, rd-gg-dl, image_generation）');
         return null;
       }
       
       // 4. 【統一去重】使用 urlKey 而不是完整的 currentSrc，與 triggerAutoDownload 保持一致
       const urlKey = getUrlKey(currentSrc, 200);
       if (!isManualClick && processedImageUrls.has(urlKey)) {
-        console.log('[Gemini 分類助手] [圖片追蹤] ⏭️  跳過：URL 已處理過（去重）');
+        _log.debug('[Gemini 分類助手] [圖片追蹤] ⏭️  跳過：URL 已處理過（去重）');
         return null;
       }
       
@@ -6491,7 +6538,7 @@
             
             if (sortedUrls.length > 0) {
               finalSrc = sortedUrls[0];
-              console.log('[Gemini 分類助手] [圖片追蹤] 🎯 從下載按鈕獲取到更高質量的 URL（長度：' + finalSrc.length + '）');
+              _log.debug('[Gemini 分類助手] [圖片追蹤] 🎯 從下載按鈕獲取到更高質量的 URL（長度：' + finalSrc.length + '）');
             }
           }
         }
@@ -6502,10 +6549,10 @@
       // 8. 生成 ID（不等待生成圖片元數據，直接使用時間戳）
       const requestId = 'img_' + Date.now();
 
-      console.log('[Gemini 分類助手] [圖片追蹤] ✅ 成功鎖定真實路徑！');
-      console.log('[Gemini 分類助手] [圖片追蹤]   src 長度:', finalSrc.length);
-      console.log('[Gemini 分類助手] [圖片追蹤]   src 預覽:', finalSrc.substring(0, 200));
-      console.log('[Gemini 分類助手] [圖片追蹤]   requestId:', requestId);
+      _log.debug('[Gemini 分類助手] [圖片追蹤] ✅ 成功鎖定真實路徑！');
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   src 長度:', finalSrc.length);
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   src 預覽:', finalSrc.substring(0, 200));
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   requestId:', requestId);
 
       return {
         id: requestId,
@@ -6514,7 +6561,7 @@
         imgElement: img
       };
     } catch (error) {
-      console.error('[Gemini 分類助手] [圖片追蹤] ❌ 提取路徑時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [圖片追蹤] ❌ 提取路徑時發生錯誤:', error);
       return null;
     }
   }
@@ -6523,21 +6570,21 @@
   async function extractGeneratedImages() {
     try {
       if (!currentChatId) {
-        console.log('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過提取，因為沒有當前對話 ID');
+        _log.debug('[Gemini 分類助手] [圖片追蹤] ⚠️ 跳過提取，因為沒有當前對話 ID');
         return;
       }
       
-      console.log('[Gemini 分類助手] [圖片追蹤] 🔥 ========== 暴力模式：開始追蹤和提取圖片 ==========');
-      console.log('[Gemini 分類助手] [圖片追蹤]   當前 URL:', window.location.href);
-      console.log('[Gemini 分類助手] [圖片追蹤]   當前 ChatId:', currentChatId);
+      _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 ========== 暴力模式：開始追蹤和提取圖片 ==========');
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   當前 URL:', window.location.href);
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   當前 ChatId:', currentChatId);
       
       let totalImagesFound = 0;
       let imagesProcessed = 0;
       
       // 【暴力策略】直接搜索所有 button.image-button 和符合條件的 img
-      console.log('[Gemini 分類助手] [圖片追蹤] 🔥 暴力策略：搜索所有 button.image-button');
+      _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 暴力策略：搜索所有 button.image-button');
       const imageButtons = document.querySelectorAll('button.image-button');
-      console.log('[Gemini 分類助手] [圖片追蹤]   找到', imageButtons.length, '個 button.image-button');
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   找到', imageButtons.length, '個 button.image-button');
       
       imageButtons.forEach((button, index) => {
         try {
@@ -6547,7 +6594,7 @@
           const imgSrc = img.src || '';
           const className = img.className || '';
           
-          console.log('[Gemini 分類助手] [圖片追蹤]   檢查 button #' + (index + 1), {
+          _log.debug('[Gemini 分類助手] [圖片追蹤]   檢查 button #' + (index + 1), {
             srcLength: imgSrc.length,
             hasLoaded: className.includes('loaded'),
             srcPreview: imgSrc.substring(0, 100)
@@ -6555,7 +6602,7 @@
           
           // 【跳過佔位符】寫死規則
           if (imgSrc.length < 100 || imgSrc.includes('/profile/picture/') || imgSrc.includes('profile/picture')) {
-            console.log('[Gemini 分類助手] [圖片追蹤]     跳過：佔位符');
+            _log.debug('[Gemini 分類助手] [圖片追蹤]     跳過：佔位符');
             // 設置監控，等待圖片載入
             setupImageObserver(button.parentElement || button);
             return;
@@ -6563,7 +6610,7 @@
           
           // 【過濾無效 URL】跳過 blob:null/ 開頭的無效 URL
           if (imgSrc && imgSrc.startsWith('blob:null/')) {
-            // console.log('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：無效的 blob:null URL'); // 已禁用，避免大量日誌
+            // _log.debug('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：無效的 blob:null URL'); // 已禁用，避免大量日誌
             return;
           }
           
@@ -6576,7 +6623,7 @@
             // 【自動模式降溫】若 URL 不含 gg-dl 或 image_generation 關鍵字（代表只是 200K 的預覽圖），則不執行 triggerAutoDownload
             const isHighQualityImage = imgSrc.includes('gg-dl') || imgSrc.includes('rd-gg-dl') || imgSrc.includes('image_generation');
             if (!isHighQualityImage) {
-              console.log('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：URL 不含 gg-dl 或 image_generation（可能是預覽圖）');
+              _log.debug('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：URL 不含 gg-dl 或 image_generation（可能是預覽圖）');
               // 設置監控，等待高質量圖片載入
               setupImageObserver(button.parentElement || button);
               return;
@@ -6585,13 +6632,13 @@
             // 【統一去重】檢查是否已處理過（使用 urlKey）
             const urlKey = getUrlKey(imgSrc, 200);
             if (processedImageUrls.has(urlKey)) {
-              console.log('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：已處理過');
+              _log.debug('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：已處理過');
               return;
             }
             
             const requestId = 'img_' + Date.now() + '_' + index;
-            console.log('[Gemini 分類助手] [圖片追蹤]     ✅ 找到生成圖！立即提取');
-            console.log('[Gemini 分類助手] [圖片追蹤]       URL:', imgSrc.substring(0, 150));
+            _log.debug('[Gemini 分類助手] [圖片追蹤]     ✅ 找到生成圖！立即提取');
+            _log.debug('[Gemini 分類助手] [圖片追蹤]       URL:', imgSrc.substring(0, 150));
             
             // 【即時回傳】立即執行 sendImageToSidePanel
             sendImageToSidePanel(imgSrc, requestId, img);
@@ -6607,18 +6654,18 @@
                 // 【自動模式降溫】即使是 loaded，也要檢查是否為高質量圖片
                 const isHighQualityImage = imgSrc.includes('gg-dl') || imgSrc.includes('rd-gg-dl') || imgSrc.includes('image_generation');
                 if (!isHighQualityImage) {
-                  console.log('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：loaded 但 URL 不含 gg-dl 或 image_generation（可能是預覽圖）');
+                  _log.debug('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：loaded 但 URL 不含 gg-dl 或 image_generation（可能是預覽圖）');
                   return;
                 }
                 
                 // 【統一去重】檢查是否已處理過（使用 urlKey）
                 const urlKey = getUrlKey(imgSrc, 200);
                 if (processedImageUrls.has(urlKey)) {
-                  console.log('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：已處理過');
+                  _log.debug('[Gemini 分類助手] [圖片追蹤]     ⏭️ 跳過：已處理過');
                   return;
                 }
                 
-                console.log('[Gemini 分類助手] [圖片追蹤]     🔥 類名包含 loaded，強行提取');
+                _log.debug('[Gemini 分類助手] [圖片追蹤]     🔥 類名包含 loaded，強行提取');
                 const requestId = 'img_' + Date.now() + '_' + index;
                 sendImageToSidePanel(imgSrc, requestId, img);
                 // 先從內存緩存中移除，讓 triggerAutoDownload 自己處理去重（包括持久化資料庫檢查）
@@ -6632,12 +6679,12 @@
               }
             }
         } catch (e) {
-          console.error('[Gemini 分類助手] [圖片追蹤]   處理 button 時發生錯誤:', e);
+          _log.error('[Gemini 分類助手] [圖片追蹤]   處理 button 時發生錯誤:', e);
         }
       });
       
       // 【暴力策略】直接搜索所有包含 googleusercontent.com 或 blob: 的 img
-      console.log('[Gemini 分類助手] [圖片追蹤] 🔥 暴力策略：搜索所有符合條件的 img');
+      _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 暴力策略：搜索所有符合條件的 img');
       const allImages = document.querySelectorAll('img');
       let directImageCount = 0;
       
@@ -6669,8 +6716,8 @@
             }
             
             const requestId = 'img_direct_' + Date.now() + '_' + index;
-            console.log('[Gemini 分類助手] [圖片追蹤]     ✅ 直接找到生成圖！立即提取');
-            console.log('[Gemini 分類助手] [圖片追蹤]       URL:', imgSrc.substring(0, 150));
+            _log.debug('[Gemini 分類助手] [圖片追蹤]     ✅ 直接找到生成圖！立即提取');
+            _log.debug('[Gemini 分類助手] [圖片追蹤]       URL:', imgSrc.substring(0, 150));
             
             // 【即時回傳】立即執行 sendImageToSidePanel
             sendImageToSidePanel(imgSrc, requestId, img);
@@ -6681,19 +6728,19 @@
             totalImagesFound++;
           }
         } catch (e) {
-          console.error('[Gemini 分類助手] [圖片追蹤]   處理 img 時發生錯誤:', e);
+          _log.error('[Gemini 分類助手] [圖片追蹤]   處理 img 時發生錯誤:', e);
         }
       });
       
-      console.log('[Gemini 分類助手] [圖片追蹤] 📊 統計:');
-      console.log('[Gemini 分類助手] [圖片追蹤]   從 button.image-button 找到:', imagesProcessed - directImageCount);
-      console.log('[Gemini 分類助手] [圖片追蹤]   直接找到的圖片:', directImageCount);
-      console.log('[Gemini 分類助手] [圖片追蹤]   總計:', totalImagesFound);
-      console.log('[Gemini 分類助手] [圖片追蹤] ========================================');
+      _log.debug('[Gemini 分類助手] [圖片追蹤] 📊 統計:');
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   從 button.image-button 找到:', imagesProcessed - directImageCount);
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   直接找到的圖片:', directImageCount);
+      _log.debug('[Gemini 分類助手] [圖片追蹤]   總計:', totalImagesFound);
+      _log.debug('[Gemini 分類助手] [圖片追蹤] ========================================');
       
       // 備用邏輯：如果暴力搜索沒找到，使用 getRealImagePath 嘗試提取
       if (totalImagesFound === 0) {
-        console.log('[Gemini 分類助手] [圖片追蹤] 🔥 暴力搜索未找到圖片，嘗試備用策略...');
+        _log.debug('[Gemini 分類助手] [圖片追蹤] 🔥 暴力搜索未找到圖片，嘗試備用策略...');
         
         // 搜索所有 button.image-button 並設置監控
         const allImageButtons = document.querySelectorAll('button.image-button');
@@ -6703,27 +6750,27 @@
       }
       
     } catch (error) {
-      console.error('[Gemini 分類助手] [圖片追蹤] ❌ 提取生成圖片時發生錯誤:', error);
-      console.error('[Gemini 分類助手] [圖片追蹤] 錯誤堆疊:', error.stack);
+      _log.error('[Gemini 分類助手] [圖片追蹤] ❌ 提取生成圖片時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [圖片追蹤] 錯誤堆疊:', error.stack);
     }
   }
 
   // 分析頁面結構（用於調試）
   function analyzePageStructure() {
-    console.log('[Gemini 分類助手] [頁面分析] ========== 開始分析頁面結構 ==========');
+    _log.debug('[Gemini 分類助手] [頁面分析] ========== 開始分析頁面結構 ==========');
     
     // 分析所有可能的輸入元素
     const allInputs = document.querySelectorAll('textarea, div[contenteditable="true"], input[type="text"]');
-    console.log('[Gemini 分類助手] [頁面分析] 找到', allInputs.length, '個可能的輸入元素');
+    _log.debug('[Gemini 分類助手] [頁面分析] 找到', allInputs.length, '個可能的輸入元素');
     
     // 分析所有圖片元素
-    console.log('[Gemini 分類助手] [頁面分析] ========== 分析圖片元素 ==========');
+    _log.debug('[Gemini 分類助手] [頁面分析] ========== 分析圖片元素 ==========');
     const allImages = document.querySelectorAll('img, [role="img"], canvas, svg, [class*="image"], [class*="Image"], [class*="generated"], [class*="result"]');
-    console.log('[Gemini 分類助手] [頁面分析] 找到', allImages.length, '個可能的圖片元素');
+    _log.debug('[Gemini 分類助手] [頁面分析] 找到', allImages.length, '個可能的圖片元素');
     
     allImages.forEach((img, index) => {
       if (index < 10) { // 只顯示前 10 個
-        console.log(`[Gemini 分類助手] [頁面分析] 圖片 #${index + 1}:`, {
+        _log.debug(`[Gemini 分類助手] [頁面分析] 圖片 #${index + 1}:`, {
           tagName: img.tagName,
           className: img.className?.substring(0, 100),
           src: img.getAttribute('src')?.substring(0, 100) || '(無 src)',
@@ -6739,15 +6786,15 @@
     });
     
     // 分析圖片容器
-    console.log('[Gemini 分類助手] [頁面分析] ========== 分析圖片容器 ==========');
+    _log.debug('[Gemini 分類助手] [頁面分析] ========== 分析圖片容器 ==========');
     const imageContainers = document.querySelectorAll('[class*="image"], [class*="generated"], [class*="result"], [data-type="image"]');
-    console.log('[Gemini 分類助手] [頁面分析] 找到', imageContainers.length, '個可能的圖片容器');
+    _log.debug('[Gemini 分類助手] [頁面分析] 找到', imageContainers.length, '個可能的圖片容器');
     
     imageContainers.forEach((container, index) => {
       if (index < 10) { // 只顯示前 10 個
         const imgs = container.querySelectorAll('img');
         const downloadBtns = container.querySelectorAll('button[aria-label*="下載"], button[aria-label*="download"], [class*="download"]');
-        console.log(`[Gemini 分類助手] [頁面分析] 容器 #${index + 1}:`, {
+        _log.debug(`[Gemini 分類助手] [頁面分析] 容器 #${index + 1}:`, {
           className: container.className?.substring(0, 100),
           tagName: container.tagName,
           imageCount: imgs.length,
@@ -6768,7 +6815,7 @@
       const role = el.getAttribute('role') || '';
       
       if (rect.width > 0 && rect.height > 0) {
-        console.log(`[Gemini 分類助手] [頁面分析] 輸入元素 ${idx + 1}:`, {
+        _log.debug(`[Gemini 分類助手] [頁面分析] 輸入元素 ${idx + 1}:`, {
           tagName,
           isContentEditable,
           placeholder: placeholder.substring(0, 50),
@@ -6783,7 +6830,7 @@
     
     // 分析所有可能的發送按鈕
     const allButtons = document.querySelectorAll('button, div[role="button"]');
-    console.log('[Gemini 分類助手] [頁面分析] 找到', allButtons.length, '個可能的按鈕元素');
+    _log.debug('[Gemini 分類助手] [頁面分析] 找到', allButtons.length, '個可能的按鈕元素');
     
     const sendButtons = [];
     allButtons.forEach((btn, idx) => {
@@ -6806,7 +6853,7 @@
       
       if (rect.width > 0 && rect.height > 0 && isLikelySendButton) {
         sendButtons.push(btn);
-        console.log(`[Gemini 分類助手] [頁面分析] 可能的發送按鈕 ${idx + 1}:`, {
+        _log.debug(`[Gemini 分類助手] [頁面分析] 可能的發送按鈕 ${idx + 1}:`, {
           ariaLabel,
           className: className.substring(0, 100),
           id,
@@ -6821,13 +6868,13 @@
 
   // 查找輸入框（帶重試機制，selector 從 adapter 讀取）
   async function findInputElement(maxRetries = 3, retryDelay = 500) {
-    console.log('[Gemini 分類助手] [發送消息] 開始查找輸入框 (最大重試次數:', maxRetries, ')');
+    _log.debug('[Gemini 分類助手] [發送消息] 開始查找輸入框 (最大重試次數:', maxRetries, ')');
 
     const __inputRegistry = window.__GAPI_SiteRegistry;
     const __inputAdapter = __inputRegistry ? __inputRegistry.getCurrentAdapter() : null;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      console.log(`[Gemini 分類助手] [發送消息] 嘗試 ${attempt}/${maxRetries}...`);
+      _log.debug(`[Gemini 分類助手] [發送消息] 嘗試 ${attempt}/${maxRetries}...`);
 
       // selector 從 adapter 讀取
       const inputSelectors = (__inputAdapter && __inputAdapter.inputSelectors) || [
@@ -6852,7 +6899,7 @@
             const isInInputContainer = el.closest('[class*="input"], [class*="composer"], [class*="textarea"], [class*="message-input"], [class*="chat-input"], form') !== null;
             
             if (isNearBottom || isInMain || isInInputContainer || elements.length === 1) {
-              console.log(`[Gemini 分類助手] [發送消息] ✓ 找到輸入框 (選擇器: ${selector}):`, {
+              _log.debug(`[Gemini 分類助手] [發送消息] ✓ 找到輸入框 (選擇器: ${selector}):`, {
                 tagName: el.tagName,
                 isContentEditable: el.isContentEditable,
                 role: el.getAttribute('role') || '',
@@ -6864,25 +6911,25 @@
             }
           }
         } catch (e) {
-          console.warn(`[Gemini 分類助手] [發送消息] 選擇器 "${selector}" 查詢出錯:`, e.message);
+          _log.warn(`[Gemini 分類助手] [發送消息] 選擇器 "${selector}" 查詢出錯:`, e.message);
           continue;
         }
       }
       
       // 如果這不是最後一次嘗試，等待後重試
       if (attempt < maxRetries) {
-        console.log(`[Gemini 分類助手] [發送消息] 未找到輸入框，等待 ${retryDelay}ms 後重試...`);
+        _log.debug(`[Gemini 分類助手] [發送消息] 未找到輸入框，等待 ${retryDelay}ms 後重試...`);
         await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
     }
     
-    console.error('[Gemini 分類助手] [發送消息] ❌ 經過', maxRetries, '次嘗試後仍找不到輸入框');
+    _log.error('[Gemini 分類助手] [發送消息] ❌ 經過', maxRetries, '次嘗試後仍找不到輸入框');
     return null;
   }
 
   // 查找發送按鈕（selector 從 adapter 讀取）
   function findSendButton(inputElement) {
-    console.log('[Gemini 分類助手] [發送消息] 開始查找發送按鈕...');
+    _log.debug('[Gemini 分類助手] [發送消息] 開始查找發送按鈕...');
 
     const __sendRegistry = window.__GAPI_SiteRegistry;
     const __sendAdapter = __sendRegistry ? __sendRegistry.getCurrentAdapter() : null;
@@ -6901,7 +6948,7 @@
             for (const btn of buttons) {
               const rect = btn.getBoundingClientRect();
               if (rect.width > 0 && rect.height > 0 && !btn.disabled) {
-                console.log(`[Gemini 分類助手] [發送消息] ✓ 在輸入框附近找到發送按鈕 (選擇器: ${selector}):`, {
+                _log.debug(`[Gemini 分類助手] [發送消息] ✓ 在輸入框附近找到發送按鈕 (選擇器: ${selector}):`, {
                   tagName: btn.tagName,
                   ariaLabel: btn.getAttribute('aria-label') || '',
                   disabled: btn.disabled,
@@ -6924,7 +6971,7 @@
         for (const btn of buttons) {
           const rect = btn.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0 && rect.y > window.innerHeight * 0.6 && !btn.disabled) {
-            console.log(`[Gemini 分類助手] [發送消息] ✓ 在頁面底部找到發送按鈕 (選擇器: ${selector}):`, {
+            _log.debug(`[Gemini 分類助手] [發送消息] ✓ 在頁面底部找到發送按鈕 (選擇器: ${selector}):`, {
               tagName: btn.tagName,
               ariaLabel: btn.getAttribute('aria-label') || '',
               disabled: btn.disabled,
@@ -6938,51 +6985,51 @@
       }
     }
     
-    console.warn('[Gemini 分類助手] [發送消息] ⚠️ 找不到發送按鈕');
+    _log.warn('[Gemini 分類助手] [發送消息] ⚠️ 找不到發送按鈕');
     return null;
   }
 
   // 發送消息到 Gemini（從側邊欄調用）- 異步函數
   async function sendMessageToSite(messageText) {
     if (!messageText || !messageText.trim()) {
-      console.error('[Gemini 分類助手] [發送消息] ❌ 消息內容為空');
+      _log.error('[Gemini 分類助手] [發送消息] ❌ 消息內容為空');
       return { success: false, error: '消息內容為空' };
     }
 
     try {
-      console.log('[Gemini 分類助手] [發送消息] ========== 開始發送消息 ==========');
-      console.log('[Gemini 分類助手] [發送消息] 消息內容:', messageText.substring(0, 100) + (messageText.length > 100 ? '...' : ''));
-      console.log('[Gemini 分類助手] [發送消息] 消息長度:', messageText.length, '字符');
+      _log.debug('[Gemini 分類助手] [發送消息] ========== 開始發送消息 ==========');
+      _log.debug('[Gemini 分類助手] [發送消息] 消息內容:', messageText.substring(0, 100) + (messageText.length > 100 ? '...' : ''));
+      _log.debug('[Gemini 分類助手] [發送消息] 消息長度:', messageText.length, '字符');
 
       // 步驟 1: 查找輸入框（帶重試機制）
       const inputElement = await findInputElement(3, 500);
       
       if (!inputElement) {
-        console.error('[Gemini 分類助手] [發送消息] ❌ 找不到輸入框');
+        _log.error('[Gemini 分類助手] [發送消息] ❌ 找不到輸入框');
         // 輸出頁面結構分析（用於調試）
         analyzePageStructure();
         return { success: false, error: '找不到輸入框（頁面可能還在加載中）' };
       }
 
-      console.log('[Gemini 分類助手] [發送消息] ✓ 輸入框查找成功');
+      _log.debug('[Gemini 分類助手] [發送消息] ✓ 輸入框查找成功');
 
       // 步驟 2: 聚焦輸入框
-      console.log('[Gemini 分類助手] [發送消息] 聚焦輸入框...');
+      _log.debug('[Gemini 分類助手] [發送消息] 聚焦輸入框...');
       try {
         inputElement.focus();
         inputElement.click(); // 確保獲得焦點
         // 滾動到可見區域
         inputElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        console.log('[Gemini 分類助手] [發送消息] ✓ 輸入框已聚焦');
+        _log.debug('[Gemini 分類助手] [發送消息] ✓ 輸入框已聚焦');
       } catch (e) {
-        console.warn('[Gemini 分類助手] [發送消息] 聚焦輸入框時發生錯誤:', e.message);
+        _log.warn('[Gemini 分類助手] [發送消息] 聚焦輸入框時發生錯誤:', e.message);
       }
 
       // 等待焦點穩定
       await new Promise(resolve => setTimeout(resolve, 200));
 
       // 步驟 3: 清空現有內容（如果有）
-      console.log('[Gemini 分類助手] [發送消息] 清空現有內容...');
+      _log.debug('[Gemini 分類助手] [發送消息] 清空現有內容...');
       try {
         if (inputElement.tagName === 'TEXTAREA') {
           inputElement.value = '';
@@ -6991,11 +7038,11 @@
           inputElement.innerText = '';
         }
       } catch (e) {
-        console.warn('[Gemini 分類助手] [發送消息] 清空內容時發生錯誤:', e.message);
+        _log.warn('[Gemini 分類助手] [發送消息] 清空內容時發生錯誤:', e.message);
       }
 
       // 步驟 4: 逐字輸入文字（模擬真人打字）
-      console.log('[Gemini 分類助手] [發送消息] 開始模擬人類打字...');
+      _log.debug('[Gemini 分類助手] [發送消息] 開始模擬人類打字...');
       try {
         inputElement.focus();
 
@@ -7067,14 +7114,14 @@
           }
         }
 
-        console.log('[Gemini 分類助手] [發送消息] ✓ 模擬打字完成，共', messageText.length, '字符');
+        _log.debug('[Gemini 分類助手] [發送消息] ✓ 模擬打字完成，共', messageText.length, '字符');
 
         // 驗證
         const currentText = inputElement.tagName === 'TEXTAREA'
           ? inputElement.value
           : (inputElement.textContent || inputElement.innerText || '');
         if (currentText.trim() !== messageText.trim()) {
-          console.warn('[Gemini 分類助手] [發送消息] ⚠️ 打字驗證失敗，使用 execCommand 補正');
+          _log.warn('[Gemini 分類助手] [發送消息] ⚠️ 打字驗證失敗，使用 execCommand 補正');
           // 清空再一次填入
           if (inputElement.isContentEditable) {
             inputElement.textContent = '';
@@ -7082,7 +7129,7 @@
           document.execCommand('insertText', false, messageText);
         }
       } catch (e) {
-        console.error('[Gemini 分類助手] [發送消息] ❌ 打字時發生錯誤，回退為瞬間填入:', e);
+        _log.error('[Gemini 分類助手] [發送消息] ❌ 打字時發生錯誤，回退為瞬間填入:', e);
         inputElement.focus();
         document.execCommand('insertText', false, messageText);
       }
@@ -7091,15 +7138,15 @@
       await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 700));
 
       // 步驟 5: 查找並點擊發送按鈕
-      console.log('[Gemini 分類助手] [發送消息] 查找發送按鈕...');
+      _log.debug('[Gemini 分類助手] [發送消息] 查找發送按鈕...');
       const sendButton = findSendButton(inputElement);
       
       if (sendButton) {
-        console.log('[Gemini 分類助手] [發送消息] ✓ 找到發送按鈕，準備點擊');
+        _log.debug('[Gemini 分類助手] [發送消息] ✓ 找到發送按鈕，準備點擊');
         
         // 檢查按鈕是否啟用
         if (sendButton.disabled) {
-          console.warn('[Gemini 分類助手] [發送消息] ⚠️ 發送按鈕被禁用，可能需要再等待一段時間...');
+          _log.warn('[Gemini 分類助手] [發送消息] ⚠️ 發送按鈕被禁用，可能需要再等待一段時間...');
           // 再等待一下
           await new Promise(resolve => setTimeout(resolve, 300));
         }
@@ -7107,17 +7154,17 @@
         try {
           // 點擊發送按鈕
           sendButton.click();
-          console.log('[Gemini 分類助手] [發送消息] ✓ 已點擊發送按鈕');
-          console.log('[Gemini 分類助手] [發送消息] ========== 消息發送完成（方法：按鈕） ==========');
+          _log.debug('[Gemini 分類助手] [發送消息] ✓ 已點擊發送按鈕');
+          _log.debug('[Gemini 分類助手] [發送消息] ========== 消息發送完成（方法：按鈕） ==========');
           return { success: true, method: 'button' };
         } catch (e) {
-          console.error('[Gemini 分類助手] [發送消息] ❌ 點擊按鈕時發生錯誤:', e);
+          _log.error('[Gemini 分類助手] [發送消息] ❌ 點擊按鈕時發生錯誤:', e);
           // 繼續嘗試鍵盤方式
         }
       }
 
       // 步驟 6: 如果沒找到按鈕，嘗試按 Enter 鍵發送
-      console.log('[Gemini 分類助手] [發送消息] ⚠️ 找不到發送按鈕或按鈕點擊失敗，嘗試按 Enter 鍵發送');
+      _log.debug('[Gemini 分類助手] [發送消息] ⚠️ 找不到發送按鈕或按鈕點擊失敗，嘗試按 Enter 鍵發送');
       
       // 確保輸入框有焦點
       inputElement.focus();
@@ -7156,13 +7203,13 @@
       });
       inputElement.dispatchEvent(enterKeyUp);
       
-      console.log('[Gemini 分類助手] [發送消息] ✓ 已發送 Enter 鍵事件');
-      console.log('[Gemini 分類助手] [發送消息] ========== 消息發送完成（方法：鍵盤） ==========');
+      _log.debug('[Gemini 分類助手] [發送消息] ✓ 已發送 Enter 鍵事件');
+      _log.debug('[Gemini 分類助手] [發送消息] ========== 消息發送完成（方法：鍵盤） ==========');
       return { success: true, method: 'keyboard' };
 
     } catch (error) {
-      console.error('[Gemini 分類助手] [發送消息] ❌ 發送消息時發生錯誤:', error);
-      console.error('[Gemini 分類助手] [發送消息] 錯誤堆疊:', error.stack);
+      _log.error('[Gemini 分類助手] [發送消息] ❌ 發送消息時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [發送消息] 錯誤堆疊:', error.stack);
       return { success: false, error: error.message };
     }
   }
@@ -7228,7 +7275,7 @@
         // ★ 策略核心：只拿第一個 (index 0)
         const firstButton = allButtons[0];
         
-        console.log('[Gemini 分類助手] [策略] 發現圖片群組，僅下載第一張代表圖');
+        _log.debug('[Gemini 分類助手] [策略] 發現圖片群組，僅下載第一張代表圖');
         
         // 點擊第一個按鈕
         firstButton.click();
@@ -7301,7 +7348,7 @@
       
       // 靜默更新按鈕列表（不輸出日誌）
     } catch (error) {
-      console.error('[Gemini 分類助手] [下載按鈕] 更新按鈕列表時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [下載按鈕] 更新按鈕列表時發生錯誤:', error);
     }
   }
 
@@ -7377,7 +7424,7 @@
                         ? foundImg.className
                         : (foundImg.className?.baseVal || foundImg.className?.toString() || '');
                       if (className && className.includes('loaded')) {
-                        console.log('[Gemini 分類助手] [全自動觸發] 🔥 檢測到圖片類名包含 loaded，自動觸發下載按鈕點擊');
+                        _log.debug('[Gemini 分類助手] [全自動觸發] 🔥 檢測到圖片類名包含 loaded，自動觸發下載按鈕點擊');
                         triggerButtonClick(button);
                         observerManager.disconnect(imgAutoTriggerName);
                       }
@@ -7395,7 +7442,7 @@
       
       // 檢查圖片類名是否包含 loaded
       if (img.className && img.className.includes('loaded')) {
-        console.log('[Gemini 分類助手] [全自動觸發] 🔥 檢測到圖片類名包含 loaded，自動觸發下載按鈕點擊');
+        _log.debug('[Gemini 分類助手] [全自動觸發] 🔥 檢測到圖片類名包含 loaded，自動觸發下載按鈕點擊');
         triggerButtonClick(button);
         return;
       }
@@ -7407,7 +7454,7 @@
           if (mutation.attributeName === 'class' && mutation.target === img) {
             const className = img.className || '';
             if (className.includes('loaded')) {
-              console.log('[Gemini 分類助手] [全自動觸發] 🔥 檢測到圖片類名變更為包含 loaded，自動觸發下載按鈕點擊');
+              _log.debug('[Gemini 分類助手] [全自動觸發] 🔥 檢測到圖片類名變更為包含 loaded，自動觸發下載按鈕點擊');
               triggerButtonClick(button);
               observerManager.disconnect(imgAutoClassName);
             }
@@ -7423,7 +7470,7 @@
       // 30秒後自動停止監控
       setTimeout(() => observerManager.disconnect(imgAutoClassName), 30000);
     } catch (error) {
-      console.error('[Gemini 分類助手] [全自動觸發] ❌ 自動觸發下載按鈕時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [全自動觸發] ❌ 自動觸發下載按鈕時發生錯誤:', error);
     }
   }
   
@@ -7463,13 +7510,13 @@
       // 4. 最後調用原生 click（確保兼容性）
       button.click();
       
-      console.log('[Gemini 分類助手] [全自動觸發] ✓ 已自動觸發下載按鈕點擊，正在監控網絡請求...');
+      _log.debug('[Gemini 分類助手] [全自動觸發] ✓ 已自動觸發下載按鈕點擊，正在監控網絡請求...');
       
       // 監控按鈕狀態變化（可能顯示 spinner）
       const checkButtonState = () => {
         const spinner = button.querySelector('mat-spinner, [class*="spinner"], [class*="loading"]');
         if (spinner) {
-          console.log('[Gemini 分類助手] [全自動觸發] 🔄 檢測到按鈕進入加載狀態');
+          _log.debug('[Gemini 分類助手] [全自動觸發] 🔄 檢測到按鈕進入加載狀態');
         }
       };
       
@@ -7492,7 +7539,7 @@
       }, 5000);
       
     } catch (error) {
-      console.error('[Gemini 分類助手] [全自動觸發] ❌ 觸發按鈕點擊時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [全自動觸發] ❌ 觸發按鈕點擊時發生錯誤:', error);
     }
   }
 
@@ -7506,19 +7553,19 @@
       const allButtonsNow = detectedDownloadButtons;
       
       if (allButtonsNow.length === 0) {
-        console.warn(`[Gemini 分類助手] [下載按鈕測試] 未找到任何下載按鈕，改用自動搜尋`);
+        _log.warn(`[Gemini 分類助手] [下載按鈕測試] 未找到任何下載按鈕，改用自動搜尋`);
         return clickBestDownloadButton();
       }
       
       if (index < 0 || index >= allButtonsNow.length) {
-        console.warn(`[Gemini 分類助手] [下載按鈕測試] 按鈕索引超出範圍: ${index} (總共 ${allButtonsNow.length} 個按鈕)`);
+        _log.warn(`[Gemini 分類助手] [下載按鈕測試] 按鈕索引超出範圍: ${index} (總共 ${allButtonsNow.length} 個按鈕)`);
         return { status: 'error', error: `按鈕索引超出範圍: ${index} (總共 ${allButtonsNow.length} 個按鈕)` };
       }
       
       const button = allButtonsNow[index];
 
       if (button) {
-        console.log(`[Gemini 分類助手] [下載按鈕測試] ⚡ 執行第 ${index} 個按鈕的下載序列`);
+        _log.debug(`[Gemini 分類助手] [下載按鈕測試] ⚡ 執行第 ${index} 個按鈕的下載序列`);
         startGlobalDownloadMonitor();
         
         // 【追蹤記錄】為測試點擊設置監聽記錄
@@ -7542,7 +7589,7 @@
         try {
           const extractedUrl = extractHighQualityUrlFromButton(button);
           if (extractedUrl) {
-            console.log('[Gemini 分類助手] [下載按鈕測試] 🔍 從按鈕提取到 URL:', extractedUrl.substring(0, 200));
+            _log.debug('[Gemini 分類助手] [下載按鈕測試] 🔍 從按鈕提取到 URL:', extractedUrl.substring(0, 200));
             
             recordClickMonitorEvent('TEST_URL_EXTRACTED', {
               buttonIndex: index,
@@ -7553,17 +7600,17 @@
             
             // 如果提取到 gg-dl 或 rd-gg-dl URL，自動觸發完整追蹤
             if (extractedUrl.includes('gg-dl') || extractedUrl.includes('rd-gg-dl')) {
-              console.log('[Gemini 分類助手] [下載按鈕測試] 🚀 檢測到下載 URL，自動觸發完整追蹤模式');
+              _log.debug('[Gemini 分類助手] [下載按鈕測試] 🚀 檢測到下載 URL，自動觸發完整追蹤模式');
               trackImageUrlRedirectChain(extractedUrl, 4).then(result => {
                 if (result.success) {
-                  console.log('[Gemini 分類助手] [下載按鈕測試] ✅ 追蹤成功，已下載圖片');
+                  _log.debug('[Gemini 分類助手] [下載按鈕測試] ✅ 追蹤成功，已下載圖片');
                   recordClickMonitorEvent('TEST_TRACK_SUCCESS', {
                     buttonIndex: index,
                     finalUrl: result.finalUrl?.substring(0, 500),
                     steps: result.chain?.length || 0
                   });
                 } else {
-                  console.log('[Gemini 分類助手] [下載按鈕測試] ⚠️ 追蹤未完成:', result.reason);
+                  _log.debug('[Gemini 分類助手] [下載按鈕測試] ⚠️ 追蹤未完成:', result.reason);
                   recordClickMonitorEvent('TEST_TRACK_FAILED', {
                     buttonIndex: index,
                     reason: result.reason,
@@ -7571,7 +7618,7 @@
                   });
                 }
               }).catch(err => {
-                console.error('[Gemini 分類助手] [下載按鈕測試] ❌ 追蹤失敗:', err);
+                _log.error('[Gemini 分類助手] [下載按鈕測試] ❌ 追蹤失敗:', err);
                 recordClickMonitorEvent('TEST_TRACK_ERROR', {
                   buttonIndex: index,
                   error: err.message
@@ -7580,7 +7627,7 @@
             }
           }
         } catch (extractError) {
-          console.warn('[Gemini 分類助手] [下載按鈕測試] 提取 URL 失敗:', extractError);
+          _log.warn('[Gemini 分類助手] [下載按鈕測試] 提取 URL 失敗:', extractError);
         }
         
         // 使用組合點擊，確保觸發 Google 的非同步請求
@@ -7604,15 +7651,15 @@
         }));
         button.click();
         
-        console.log('[Gemini 分類助手] [下載按鈕測試] ✓ 已點擊按鈕，正在監控網絡請求...');
+        _log.debug('[Gemini 分類助手] [下載按鈕測試] ✓ 已點擊按鈕，正在監控網絡請求...');
         
         return { status: 'ok', message: `已點擊第 ${index} 個按鈕，正在追蹤記錄` };
       } else {
-        console.warn(`[Gemini 分類助手] [下載按鈕測試] 按鈕不存在: 索引 ${index}`);
+        _log.warn(`[Gemini 分類助手] [下載按鈕測試] 按鈕不存在: 索引 ${index}`);
         return { status: 'error', error: `按鈕不存在: 索引 ${index}` };
       }
     } catch (error) {
-      console.error('[Gemini 分類助手] [下載按鈕測試] 點擊按鈕時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [下載按鈕測試] 點擊按鈕時發生錯誤:', error);
       recordClickMonitorEvent('TEST_BUTTON_CLICK_ERROR', {
         error: error.message || String(error)
       });
@@ -7626,11 +7673,11 @@
       processedImageUrls.clear();
       const button = findBestDownloadButton();
       if (!button) {
-        console.warn('[Gemini 分類助手] [下載按鈕測試] 自動搜尋失敗：未找到按鈕');
+        _log.warn('[Gemini 分類助手] [下載按鈕測試] 自動搜尋失敗：未找到按鈕');
         return { status: 'error', error: '未找到下載按鈕' };
       }
 
-      console.log('[Gemini 分類助手] [下載按鈕測試] ⚡ 自動找到按鈕，準備點擊');
+      _log.debug('[Gemini 分類助手] [下載按鈕測試] ⚡ 自動找到按鈕，準備點擊');
       startGlobalDownloadMonitor();
 
       // 設置攔截器，開始監聽 URL 轉向
@@ -7669,7 +7716,7 @@
 
       return { status: 'ok', message: '已自動點擊下載按鈕，正在追蹤記錄' };
     } catch (error) {
-      console.error('[Gemini 分類助手] [下載按鈕測試] 自動點擊失敗:', error);
+      _log.error('[Gemini 分類助手] [下載按鈕測試] 自動點擊失敗:', error);
       return { status: 'error', error: error.message || String(error) };
     }
   }
@@ -7719,7 +7766,7 @@
                   }
                 }
               } catch (error) {
-                console.error('[Gemini 分類助手] [高畫質提取] 從背景圖提取時發生錯誤:', error);
+                _log.error('[Gemini 分類助手] [高畫質提取] 從背景圖提取時發生錯誤:', error);
               }
             }
             
@@ -7746,7 +7793,7 @@
             if (urlMatch && urlMatch[1]) {
               const bgUrl = urlMatch[1];
               if (bgUrl.includes('googleusercontent.com') && bgUrl.length > 200) {
-                console.log('[Gemini 分類助手] [高畫質提取] ✓ 從按鈕背景圖中提取到 URL:', bgUrl.substring(0, 100));
+                _log.debug('[Gemini 分類助手] [高畫質提取] ✓ 從按鈕背景圖中提取到 URL:', bgUrl.substring(0, 100));
                 const requestId = extractRequestIdFromButton(button) || 'bg_' + Date.now();
                 const originalUrl = extractOriginalImageUrl(bgUrl, button);
                 if (originalUrl) {
@@ -7756,7 +7803,7 @@
             }
           }
         } catch (error) {
-          console.error('[Gemini 分類助手] [高畫質提取] 從背景圖提取時發生錯誤:', error);
+          _log.error('[Gemini 分類助手] [高畫質提取] 從背景圖提取時發生錯誤:', error);
         }
       }
       
@@ -7775,7 +7822,7 @@
         try {
           // 檢查按鈕是否仍然存在且可見
           if (button.isConnected && button.offsetParent !== null) {
-            console.log('[Gemini 分類助手] [下載按鈕] 🔔 觸發點擊下載按鈕');
+            _log.debug('[Gemini 分類助手] [下載按鈕] 🔔 觸發點擊下載按鈕');
             
             // 觸發點擊事件
             button.click();
@@ -7800,7 +7847,7 @@
             }, 100);
           }
         } catch (error) {
-          console.error('[Gemini 分類助手] [下載按鈕] ❌ 自動點擊失敗:', error);
+          _log.error('[Gemini 分類助手] [下載按鈕] ❌ 自動點擊失敗:', error);
         }
       }, 300);
       
@@ -7812,7 +7859,7 @@
       }
       
     } catch (error) {
-      console.error('[Gemini 分類助手] [下載按鈕] ❌ 提取 URL 時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [下載按鈕] ❌ 提取 URL 時發生錯誤:', error);
     }
     return null;
   }
@@ -7833,7 +7880,7 @@
             const bgUrl = urlMatch[1];
             // 檢查是否是有效的圖片 URL
             if (bgUrl.includes('googleusercontent.com') && bgUrl.length > 200) {
-              console.log('[Gemini 分類助手] [背景圖提取] ✓ 從 button.image-button 的背景圖中提取到 URL:', bgUrl.substring(0, 100));
+              _log.debug('[Gemini 分類助手] [背景圖提取] ✓ 從 button.image-button 的背景圖中提取到 URL:', bgUrl.substring(0, 100));
               // 創建一個臨時的 img 元素來返回（用於兼容現有邏輯）
               const tempImg = document.createElement('img');
               tempImg.src = bgUrl;
@@ -7843,7 +7890,7 @@
           }
         }
       } catch (error) {
-        console.error('[Gemini 分類助手] [背景圖提取] 提取背景圖時發生錯誤:', error);
+        _log.error('[Gemini 分類助手] [背景圖提取] 提取背景圖時發生錯誤:', error);
       }
     }
     
@@ -7906,7 +7953,7 @@
       
       return originalUrl;
     } catch (error) {
-      console.error('[Gemini 分類助手] 構建原始 URL 時發生錯誤:', error);
+      _log.error('[Gemini 分類助手] 構建原始 URL 時發生錯誤:', error);
       return null;
     }
   }
@@ -7924,13 +7971,13 @@
           if (urlMatch && urlMatch[1]) {
             const bgUrl = urlMatch[1];
             if (bgUrl.includes('googleusercontent.com') && bgUrl.length > 200) {
-              console.log('[Gemini 分類助手] [URL提取] ✓ 從背景圖中提取到 URL:', bgUrl.substring(0, 100));
+              _log.debug('[Gemini 分類助手] [URL提取] ✓ 從背景圖中提取到 URL:', bgUrl.substring(0, 100));
               url = bgUrl;
             }
           }
         }
       } catch (error) {
-        console.error('[Gemini 分類助手] [URL提取] 從背景圖提取時發生錯誤:', error);
+        _log.error('[Gemini 分類助手] [URL提取] 從背景圖提取時發生錯誤:', error);
       }
     }
     
@@ -7996,32 +8043,32 @@
     window.geminiAssistantDebug = {
       // 分析頁面結構
       analyzePage: function() {
-        console.log('=== Gemini 助手頁面結構分析 ===');
-        console.log('URL:', window.location.href);
-        console.log('ChatId:', typeof currentChatId !== 'undefined' ? currentChatId : '(未定義)');
-        console.log('Title:', typeof currentTitle !== 'undefined' ? currentTitle : '(未定義)');
-        console.log('User Profile:', typeof currentUserProfile !== 'undefined' ? currentUserProfile : '(未定義)');
+        _log.debug('=== Gemini 助手頁面結構分析 ===');
+        _log.debug('URL:', window.location.href);
+        _log.debug('ChatId:', typeof currentChatId !== 'undefined' ? currentChatId : '(未定義)');
+        _log.debug('Title:', typeof currentTitle !== 'undefined' ? currentTitle : '(未定義)');
+        _log.debug('User Profile:', typeof currentUserProfile !== 'undefined' ? currentUserProfile : '(未定義)');
         
         // 分析標題
-        console.log('\n--- 標題分析 ---');
-        console.log('document.title:', document.title);
+        _log.debug('--- 標題分析 ---');
+        _log.debug('document.title:', document.title);
         const h1s = document.querySelectorAll('h1');
-        console.log('H1 數量:', h1s.length);
+        _log.debug('H1 數量:', h1s.length);
         h1s.forEach((h1, i) => {
-          console.log(`H1 #${i + 1}:`, h1.innerText || h1.textContent);
+          _log.debug(`H1 #${i + 1}:`, h1.innerText || h1.textContent);
         });
         
         // 分析對話鏈接（透過 adapter）
-        console.log('\n--- 對話鏈接分析 ---');
+        _log.debug('--- 對話鏈接分析 ---');
         const __dbgReg1 = window.__GAPI_SiteRegistry;
         const __dbgAdp1 = __dbgReg1 ? __dbgReg1.getCurrentAdapter() : null;
         const __dbgSel1 = (__dbgAdp1 && typeof __dbgAdp1.sidebarLinkSelector === 'function')
           ? __dbgAdp1.sidebarLinkSelector('')
           : 'a[href]';
         const links = document.querySelectorAll(__dbgSel1);
-        console.log('對話鏈接數量:', links.length);
+        _log.debug('對話鏈接數量:', links.length);
         links.slice(0, 10).forEach((link, i) => {
-          console.log(`鏈接 #${i + 1}:`, {
+          _log.debug(`鏈接 #${i + 1}:`, {
             href: link.href,
             text: (link.innerText || link.textContent || '').trim().substring(0, 100),
             ariaLabel: link.getAttribute('aria-label') || '',
@@ -8030,7 +8077,7 @@
         });
         
         // 分析消息元素
-        console.log('\n--- 消息元素分析 ---');
+        _log.debug('--- 消息元素分析 ---');
         const messageSelectors = [
           '[class*="user-query"]',
           '[class*="userQuery"]',
@@ -8045,31 +8092,31 @@
           try {
             const elements = document.querySelectorAll(selector);
             if (elements.length > 0) {
-              console.log(`${selector}: 找到 ${elements.length} 個元素`);
+              _log.debug(`${selector}: 找到 ${elements.length} 個元素`);
               elements.slice(0, 3).forEach((el, i) => {
                 const text = (el.innerText || el.textContent || '').trim();
                 if (text.length > 0) {
-                  console.log(`  [${i + 1}] 文本預覽:`, text.substring(0, 100));
-                  console.log(`      類名:`, el.className?.substring(0, 100));
+                  _log.debug(`  [${i + 1}] 文本預覽:`, text.substring(0, 100));
+                  _log.debug(`      類名:`, el.className?.substring(0, 100));
                 }
               });
             }
           } catch (e) {
-            console.warn(`選擇器 "${selector}" 查詢出錯:`, e.message);
+            _log.warn(`選擇器 "${selector}" 查詢出錯:`, e.message);
           }
         });
         
         // 分析所有包含文本的 div
-        console.log('\n--- 包含文本的容器分析 ---');
+        _log.debug('--- 包含文本的容器分析 ---');
         const allDivs = document.querySelectorAll('div');
         const textDivs = Array.from(allDivs).filter(div => {
           const text = (div.innerText || div.textContent || '').trim();
           return text.length > 20 && text.length < 5000;
         });
-        console.log(`找到 ${textDivs.length} 個包含文本的 div`);
+        _log.debug(`找到 ${textDivs.length} 個包含文本的 div`);
         textDivs.slice(0, 10).forEach((div, i) => {
           const text = (div.innerText || div.textContent || '').trim();
-          console.log(`容器 #${i + 1}:`, {
+          _log.debug(`容器 #${i + 1}:`, {
             className: div.className?.substring(0, 100) || '(無)',
             textPreview: text.substring(0, 100),
             dataRole: div.getAttribute('data-role') || '(無)'
@@ -8079,23 +8126,23 @@
       
       // 手動提取標題
       extractTitle: function() {
-        console.log('=== 手動提取標題 ===');
+        _log.debug('=== 手動提取標題 ===');
         if (typeof extractTitle === 'function') {
           extractTitle();
         } else {
-          console.error('extractTitle 函數未定義');
+          _log.error('extractTitle 函數未定義');
         }
       },
       
       // 手動提取消息
       extractMessages: function() {
-        console.log('=== 手動提取消息 ===');
+        _log.debug('=== 手動提取消息 ===');
         if (typeof scrapeMessages === 'function') {
           const messages = scrapeMessages();
-          console.log('提取到的消息:', messages);
+          _log.debug('提取到的消息:', messages);
           return messages;
         } else {
-          console.error('scrapeMessages 函數未定義');
+          _log.error('scrapeMessages 函數未定義');
           return [];
         }
       },
@@ -8112,12 +8159,12 @@
       }
     };
     
-    console.log('[Gemini 分類助手] 調試工具已載入，使用 window.geminiAssistantDebug 訪問');
-    console.log('[Gemini 分類助手] 可用方法:');
-    console.log('  - window.geminiAssistantDebug.analyzePage() - 分析頁面結構');
-    console.log('  - window.geminiAssistantDebug.extractTitle() - 手動提取標題');
-    console.log('  - window.geminiAssistantDebug.extractMessages() - 手動提取消息');
-    console.log('  - window.geminiAssistantDebug.getStatus() - 獲取當前狀態');
+    _log.debug('[Gemini 分類助手] 調試工具已載入，使用 window.geminiAssistantDebug 訪問');
+    _log.debug('[Gemini 分類助手] 可用方法:');
+    _log.debug('  - window.geminiAssistantDebug.analyzePage() - 分析頁面結構');
+    _log.debug('  - window.geminiAssistantDebug.extractTitle() - 手動提取標題');
+    _log.debug('  - window.geminiAssistantDebug.extractMessages() - 手動提取消息');
+    _log.debug('  - window.geminiAssistantDebug.getStatus() - 獲取當前狀態');
   }
 
   // 全局攔截器管理：支持多個按鈕同時攔截
@@ -8234,7 +8281,7 @@
                       if (!window._geminiInterceptors.extractedImageUrls.has(imageUrl)) {
                         window._geminiInterceptors.extractedImageUrls.add(imageUrl);
                         
-                        console.log('[Gemini 分類助手] [API 攔截] ✓ 從 batchexecute 響應中提取到圖片信息:', {
+                        _log.debug('[Gemini 分類助手] [API 攔截] ✓ 從 batchexecute 響應中提取到圖片信息:', {
                           url: imageUrl.substring(0, 100),
                           chatId: chatId,
                           token: token ? token.substring(0, 50) + '...' : null,
@@ -8251,7 +8298,7 @@
                             const jslog = btn.getAttribute('jslog') || '';
                             if (jslog.includes(metadata[0]) || jslog.includes(metadataStr)) {
                               targetButton = btn;
-                              console.log('[Gemini 分類助手] [API 攔截] ✓ 找到匹配的下載按鈕（通過 metadata）');
+                              _log.debug('[Gemini 分類助手] [API 攔截] ✓ 找到匹配的下載按鈕（通過 metadata）');
                               break;
                             }
                           }
@@ -8263,7 +8310,7 @@
                           if (buttons.length > 0) {
                             // 選擇最後一個按鈕（通常是最新的）
                             targetButton = buttons[buttons.length - 1];
-                            console.log('[Gemini 分類助手] [API 攔截] ✓ 使用最新的下載按鈕');
+                            _log.debug('[Gemini 分類助手] [API 攔截] ✓ 使用最新的下載按鈕');
                           }
                         }
                         
@@ -8274,13 +8321,13 @@
                           // 延遲模擬點擊，確保按鈕已準備好
                           setTimeout(() => {
                             try {
-                              console.log('[Gemini 分類助手] [API 攔截] 🔥 模擬點擊下載按鈕以觸發下載');
+                              _log.debug('[Gemini 分類助手] [API 攔截] 🔥 模擬點擊下載按鈕以觸發下載');
                               triggerButtonClick(targetButton);
                               
                               // 監控後續的網絡請求（通過攔截器）
                               // 攔截器會在按鈕點擊後自動監控 fetch/XHR 請求
                             } catch (error) {
-                              console.error('[Gemini 分類助手] [API 攔截] 模擬點擊失敗:', error);
+                              _log.error('[Gemini 分類助手] [API 攔截] 模擬點擊失敗:', error);
                             }
                           }, 500);
                         }
@@ -8319,7 +8366,7 @@
                     (url.includes('googleusercontent.com') && url.length > 200)) {
                   if (!window._geminiInterceptors.extractedImageUrls.has(url)) {
                     window._geminiInterceptors.extractedImageUrls.add(url);
-                    console.log('[Gemini 分類助手] [API 攔截] ✓ 從 batchexecute 響應中提取到圖片 URL:', url.substring(0, 100));
+                    _log.debug('[Gemini 分類助手] [API 攔截] ✓ 從 batchexecute 響應中提取到圖片 URL:', url.substring(0, 100));
                     
                     // 查找並模擬點擊按鈕
                     const buttons = document.querySelectorAll('button[data-test-id="download-generated-image-button"]');
@@ -8350,13 +8397,13 @@
               }
             } catch (e) {
               // 解析失敗，繼續下一個項
-              console.log('[Gemini 分類助手] [API 攔截] 解析 URL 數組失敗:', e.message);
+              _log.debug('[Gemini 分類助手] [API 攔截] 解析 URL 數組失敗:', e.message);
             }
           }
         }
       } catch (error) {
         // 解析失敗，忽略
-        console.log('[Gemini 分類助手] [API 攔截] 解析 batchexecute 響應失敗:', error.message);
+        _log.debug('[Gemini 分類助手] [API 攔截] 解析 batchexecute 響應失敗:', error.message);
       }
       return null;
     }
@@ -8706,7 +8753,7 @@
   async function trackImageUrlRedirectChain(startUrl, maxSteps = 4, currentStep = 0, redirectChain = []) {
     try {
       if (currentStep >= maxSteps) {
-        console.warn('[Gemini 分類助手] [原始圖追蹤] ⚠️ 已達到最大追蹤次數:', maxSteps);
+        _log.warn('[Gemini 分類助手] [原始圖追蹤] ⚠️ 已達到最大追蹤次數:', maxSteps);
         recordClickMonitorEvent('TRACK_MAX_STEPS_REACHED', {
           startUrl: startUrl.substring(0, 500),
           finalUrl: redirectChain.length > 0 ? redirectChain[redirectChain.length - 1].url : startUrl,
@@ -8723,7 +8770,7 @@
       // 【優化】URL 去重：檢查是否正在追蹤或已追蹤過
       const urlKey = startUrl.substring(0, 200); // 使用前 200 字符作為 key
       if (trackingUrls.has(urlKey)) {
-        console.log('[Gemini 分類助手] [原始圖追蹤] ⏭️ 跳過：URL 正在追蹤中:', urlKey.substring(0, 100));
+        _log.debug('[Gemini 分類助手] [原始圖追蹤] ⏭️ 跳過：URL 正在追蹤中:', urlKey.substring(0, 100));
         return { success: false, reason: 'already_tracking', chain: redirectChain };
       }
       
@@ -8740,7 +8787,7 @@
         trackingUrls.delete(urlKey);
       }, 30000);
       
-      console.log(`[Gemini 分類助手] [原始圖追蹤] 🔍 步驟 ${currentStep + 1}/${maxSteps}: 追蹤 URL:`, startUrl.substring(0, 200));
+      _log.debug(`[Gemini 分類助手] [原始圖追蹤] 🔍 步驟 ${currentStep + 1}/${maxSteps}: 追蹤 URL:`, startUrl.substring(0, 200));
       
       // 記錄當前步驟
       const stepRecord = {
@@ -8778,7 +8825,7 @@
         const finalUrl = response.url || response.redirected ? response.url : startUrl;
         
         if (finalUrl !== startUrl) {
-          console.log(`[Gemini 分類助手] [原始圖追蹤] 🔀 檢測到重定向:`, finalUrl.substring(0, 200));
+          _log.debug(`[Gemini 分類助手] [原始圖追蹤] 🔀 檢測到重定向:`, finalUrl.substring(0, 200));
           
           recordClickMonitorEvent('TRACK_REDIRECT', {
             step: currentStep + 1,
@@ -8793,7 +8840,7 @@
                                      (finalUrl.includes('rd-gg-dl') && finalUrl.includes('s0'));
           
           if (isFinalDownloadUrl) {
-            console.log('[Gemini 分類助手] [原始圖追蹤] ✅ 找到最終下載 URL:', finalUrl.substring(0, 200));
+            _log.debug('[Gemini 分類助手] [原始圖追蹤] ✅ 找到最終下載 URL:', finalUrl.substring(0, 200));
             
             stepRecord.finalUrl = finalUrl;
             stepRecord.isFinal = true;
@@ -8837,7 +8884,7 @@
                 const urlMatch = text.match(pattern);
                 if (urlMatch && urlMatch[0] && urlMatch[0] !== startUrl) {
                   const foundUrl = urlMatch[0];
-                  console.log('[Gemini 分類助手] [原始圖追蹤] 🔍 從響應中提取到 URL:', foundUrl.substring(0, 200));
+                  _log.debug('[Gemini 分類助手] [原始圖追蹤] 🔍 從響應中提取到 URL:', foundUrl.substring(0, 200));
                   
                   recordClickMonitorEvent('TRACK_URL_EXTRACTED', {
                     step: currentStep + 1,
@@ -8851,11 +8898,11 @@
                 }
               }
             } catch (e) {
-              console.warn('[Gemini 分類助手] [原始圖追蹤] 讀取響應文本失敗:', e);
+              _log.warn('[Gemini 分類助手] [原始圖追蹤] 讀取響應文本失敗:', e);
             }
           } else if (contentType.includes('image')) {
             // 如果響應本身就是圖片，直接下載
-            console.log('[Gemini 分類助手] [原始圖追蹤] ✅ 響應為圖片，直接下載:', startUrl.substring(0, 200));
+            _log.debug('[Gemini 分類助手] [原始圖追蹤] ✅ 響應為圖片，直接下載:', startUrl.substring(0, 200));
             
             stepRecord.isFinal = true;
             stepRecord.isImage = true;
@@ -8870,7 +8917,7 @@
         }
         
         // 如果沒有找到下一個 URL，返回當前結果
-        console.log('[Gemini 分類助手] [原始圖追蹤] ⚠️ 未找到下一個 URL，停止追蹤');
+        _log.debug('[Gemini 分類助手] [原始圖追蹤] ⚠️ 未找到下一個 URL，停止追蹤');
         
         // 清理追蹤標記
         trackingUrls.delete(urlKey);
@@ -8878,7 +8925,7 @@
         return { success: false, reason: 'no_next_url', chain: redirectChain };
         
       } catch (error) {
-        console.error('[Gemini 分類助手] [原始圖追蹤] ❌ 追蹤失敗:', error);
+        _log.error('[Gemini 分類助手] [原始圖追蹤] ❌ 追蹤失敗:', error);
         
         // 清理追蹤標記
         trackingUrls.delete(urlKey);
@@ -8893,7 +8940,7 @@
         return { success: false, reason: 'error', error: error.message, chain: redirectChain };
       }
     } catch (error) {
-      console.error('[Gemini 分類助手] [原始圖追蹤] ❌ 追蹤過程發生錯誤:', error);
+      _log.error('[Gemini 分類助手] [原始圖追蹤] ❌ 追蹤過程發生錯誤:', error);
       
       // 清理追蹤標記
       const urlKey = startUrl ? startUrl.substring(0, 200) : '';
@@ -9055,7 +9102,7 @@
       
       return buttonInfo;
     } catch (error) {
-      console.error('[Gemini 分類助手] [追蹤記錄] 提取按鈕信息失敗:', error);
+      _log.error('[Gemini 分類助手] [追蹤記錄] 提取按鈕信息失敗:', error);
       return null;
     }
   }
@@ -9154,7 +9201,7 @@
       }
       return record;
     } catch (error) {
-      console.error('[Gemini 分類助手] [監聽記錄] 記錄失敗:', error);
+      _log.error('[Gemini 分類助手] [監聽記錄] 記錄失敗:', error);
       return null;
     }
   }
@@ -9222,7 +9269,7 @@
           }
         }
       } catch (error) {
-        console.warn('[Gemini 分類助手] [監聽記錄] 處理圖示點擊失敗:', error);
+        _log.warn('[Gemini 分類助手] [監聽記錄] 處理圖示點擊失敗:', error);
       }
     }, true);
   }
@@ -9246,7 +9293,7 @@
         };
       }
     } catch (e) {
-      console.warn('[Gemini 分類助手] [監聽記錄] 更新本地記錄失敗:', e);
+      _log.warn('[Gemini 分類助手] [監聽記錄] 更新本地記錄失敗:', e);
     }
 
     if (isRuntimeValid()) {
@@ -9552,15 +9599,15 @@
                     
                     // 【完整追蹤模式】如果找到 URL，自動觸發完整追蹤
                     if (foundUrl.includes('rd-gg-dl') || foundUrl.includes('rd-gg')) {
-                      console.log('[Gemini 分類助手] [原始圖追蹤] 🚀 自動觸發完整追蹤模式:', foundUrl.substring(0, 200));
+                      _log.debug('[Gemini 分類助手] [原始圖追蹤] 🚀 自動觸發完整追蹤模式:', foundUrl.substring(0, 200));
                       trackImageUrlRedirectChain(foundUrl, 4).then(result => {
                         if (result.success) {
-                          console.log('[Gemini 分類助手] [原始圖追蹤] ✅ 追蹤成功，已下載圖片');
+                          _log.debug('[Gemini 分類助手] [原始圖追蹤] ✅ 追蹤成功，已下載圖片');
                         } else {
-                          console.log('[Gemini 分類助手] [原始圖追蹤] ⚠️ 追蹤未完成:', result.reason);
+                          _log.debug('[Gemini 分類助手] [原始圖追蹤] ⚠️ 追蹤未完成:', result.reason);
                         }
                       }).catch(err => {
-                        console.error('[Gemini 分類助手] [原始圖追蹤] ❌ 追蹤失敗:', err);
+                        _log.error('[Gemini 分類助手] [原始圖追蹤] ❌ 追蹤失敗:', err);
                       });
                     }
                     
@@ -9574,15 +9621,15 @@
             
             // 【完整追蹤模式】如果請求的 URL 包含 gg-dl，自動觸發完整追蹤
             if (url.includes('gg-dl') && response.ok) {
-              console.log('[Gemini 分類助手] [原始圖追蹤] 🚀 檢測到 gg-dl URL，自動觸發完整追蹤模式');
+              _log.debug('[Gemini 分類助手] [原始圖追蹤] 🚀 檢測到 gg-dl URL，自動觸發完整追蹤模式');
               trackImageUrlRedirectChain(url, 4).then(result => {
                 if (result.success) {
-                  console.log('[Gemini 分類助手] [原始圖追蹤] ✅ 追蹤成功，已下載圖片');
+                  _log.debug('[Gemini 分類助手] [原始圖追蹤] ✅ 追蹤成功，已下載圖片');
                 } else {
-                  console.log('[Gemini 分類助手] [原始圖追蹤] ⚠️ 追蹤未完成:', result.reason);
+                  _log.debug('[Gemini 分類助手] [原始圖追蹤] ⚠️ 追蹤未完成:', result.reason);
                 }
               }).catch(err => {
-                console.error('[Gemini 分類助手] [原始圖追蹤] ❌ 追蹤失敗:', err);
+                _log.error('[Gemini 分類助手] [原始圖追蹤] ❌ 追蹤失敗:', err);
               });
             }
             
@@ -9752,7 +9799,7 @@
     };
   }
   
-  console.log('[Gemini 分類助手] Content Script 初始化完成');
+  _log.debug('[Gemini 分類助手] Content Script 初始化完成');
 
 })();
 
@@ -9762,39 +9809,39 @@ if (typeof window !== 'undefined') {
   window.geminiAssistantDebug = {
         // 分析頁面結構
         analyzePage: function() {
-          console.log('=== Gemini 助手頁面結構分析 ===');
-          console.log('URL:', window.location.href);
+          _log.debug('=== Gemini 助手頁面結構分析 ===');
+          _log.debug('URL:', window.location.href);
           
           // 嘗試從 URL 提取 chatId
           const urlMatch = window.location.href.match(/\/app\/([^/?#]+)/);
           const chatId = urlMatch ? urlMatch[1] : '(未找到)';
-          console.log('ChatId (從 URL):', chatId);
+          _log.debug('ChatId (從 URL):', chatId);
           
           // 分析標題
-          console.log('\n--- 標題分析 ---');
-          console.log('document.title:', document.title);
+          _log.debug('--- 標題分析 ---');
+          _log.debug('document.title:', document.title);
           const h1s = document.querySelectorAll('h1');
-          console.log('H1 數量:', h1s.length);
+          _log.debug('H1 數量:', h1s.length);
           h1s.forEach((h1, i) => {
             const text = (h1.innerText || h1.textContent || '').trim();
             if (text.length > 0) {
-              console.log(`H1 #${i + 1}:`, text);
+              _log.debug(`H1 #${i + 1}:`, text);
             }
           });
           
           // 分析對話鏈接（透過 adapter）
-          console.log('\n--- 對話鏈接分析 ---');
+          _log.debug('--- 對話鏈接分析 ---');
           const __dbgReg2 = window.__GAPI_SiteRegistry;
           const __dbgAdp2 = __dbgReg2 ? __dbgReg2.getCurrentAdapter() : null;
           const __dbgSel2 = (__dbgAdp2 && typeof __dbgAdp2.sidebarLinkSelector === 'function')
             ? __dbgAdp2.sidebarLinkSelector('')
             : 'a[href]';
           const links = document.querySelectorAll(__dbgSel2);
-          console.log('對話鏈接數量:', links.length);
+          _log.debug('對話鏈接數量:', links.length);
           links.slice(0, 10).forEach((link, i) => {
             const text = (link.innerText || link.textContent || '').trim();
             if (text.length > 0) {
-              console.log(`鏈接 #${i + 1}:`, {
+              _log.debug(`鏈接 #${i + 1}:`, {
                 href: link.href,
                 text: text.substring(0, 100),
                 ariaLabel: link.getAttribute('aria-label') || '',
@@ -9804,7 +9851,7 @@ if (typeof window !== 'undefined') {
           });
           
           // 分析消息元素
-          console.log('\n--- 消息元素分析 ---');
+          _log.debug('--- 消息元素分析 ---');
           const messageSelectors = [
             '[class*="user-query"]',
             '[class*="userQuery"]',
@@ -9822,13 +9869,13 @@ if (typeof window !== 'undefined') {
             try {
               const elements = document.querySelectorAll(selector);
               if (elements.length > 0) {
-                console.log(`${selector}: 找到 ${elements.length} 個元素`);
+                _log.debug(`${selector}: 找到 ${elements.length} 個元素`);
                 elements.slice(0, 3).forEach((el, i) => {
                   const text = (el.innerText || el.textContent || '').trim();
                   if (text.length > 0) {
-                    console.log(`  [${i + 1}] 文本預覽:`, text.substring(0, 100));
-                    console.log(`      類名:`, el.className?.substring(0, 100) || '(無)');
-                    console.log(`      data-role:`, el.getAttribute('data-role') || '(無)');
+                    _log.debug(`  [${i + 1}] 文本預覽:`, text.substring(0, 100));
+                    _log.debug(`      類名:`, el.className?.substring(0, 100) || '(無)');
+                    _log.debug(`      data-role:`, el.getAttribute('data-role') || '(無)');
                   }
                 });
               }
@@ -9838,16 +9885,16 @@ if (typeof window !== 'undefined') {
           });
           
           // 分析所有包含文本的 div
-          console.log('\n--- 包含文本的容器分析 (前 20 個) ---');
+          _log.debug('--- 包含文本的容器分析 (前 20 個) ---');
           const allDivs = document.querySelectorAll('div');
           const textDivs = Array.from(allDivs).filter(div => {
             const text = (div.innerText || div.textContent || '').trim();
             return text.length > 20 && text.length < 5000;
           });
-          console.log(`找到 ${textDivs.length} 個包含文本的 div`);
+          _log.debug(`找到 ${textDivs.length} 個包含文本的 div`);
           textDivs.slice(0, 20).forEach((div, i) => {
             const text = (div.innerText || div.textContent || '').trim();
-            console.log(`容器 #${i + 1}:`, {
+            _log.debug(`容器 #${i + 1}:`, {
               className: div.className?.substring(0, 150) || '(無)',
               textPreview: text.substring(0, 150),
               dataRole: div.getAttribute('data-role') || '(無)',
@@ -9868,6 +9915,6 @@ if (typeof window !== 'undefined') {
         }
       };
       
-  console.log('[Gemini 分類助手] 調試工具已載入（外部版本）');
-  console.log('[Gemini 分類助手] 使用 window.geminiAssistantDebug.analyzePage() 分析頁面結構');
+  _log.debug('[Gemini 分類助手] 調試工具已載入（外部版本）');
+  _log.debug('[Gemini 分類助手] 使用 window.geminiAssistantDebug.analyzePage() 分析頁面結構');
 }

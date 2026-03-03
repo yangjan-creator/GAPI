@@ -214,6 +214,7 @@ class GAPIWebSocketClient {
         this.ws.onclose = () => {
           console.log('[GAPI-WS] Connection closed');
           this.authenticated = false;
+          chrome.action.setBadgeText({ text: '' });
           this.scheduleReconnect();
         };
 
@@ -245,13 +246,17 @@ class GAPIWebSocketClient {
       if (msg.type === 'auth_ok') {
         this.authenticated = true;
         this.sessionId = msg.payload.session_id;
-        
+
         const pending = this.pendingRequests.get('auth');
         if (pending) {
           pending.resolve(this.sessionId);
           this.pendingRequests.delete('auth');
         }
-        
+
+        // Show green "ON" badge
+        chrome.action.setBadgeText({ text: 'ON' });
+        chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
+
         this.startHeartbeat();
         this.notifyAdmin({ type: 'gapi_connected', sessionId: this.sessionId });
         this.syncPages();
@@ -502,6 +507,27 @@ class GAPIWebSocketClient {
       });
     });
 
+    // getInfo: get tab's conversation info (chatId, title, url)
+    if (action === 'getInfo') {
+      try {
+        const resp = await trySend(tab_id, { action: 'getCurrentConversation' });
+        const tab = await chrome.tabs.get(tab_id);
+        sendResult({
+          success: true,
+          data: {
+            tab_id,
+            url: tab.url,
+            chat_id: resp?.chatId || null,
+            title: resp?.title || null,
+            page_title: tab.title || null
+          }
+        });
+      } catch (err) {
+        sendResult({ success: false, error: err.message });
+      }
+      return;
+    }
+
     // createTab: open a new browser tab
     if (action === 'createTab') {
       try {
@@ -664,6 +690,8 @@ class GAPIWebSocketClient {
 
   // 斷開連接
   disconnect() {
+    // Clear badge
+    chrome.action.setBadgeText({ text: '' });
     // Clear all timers and alarms
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -3838,12 +3866,32 @@ async function collectActivePages() {
     try {
       ping = await pingGeminiTab(t.id);
     } catch { /* tab not ready */ }
+    let title = ping?.title || null;
+    // If content script didn't return a title, try extracting from sidebar via direct execution
+    if (!title && (ping?.chatId || parseChatIdFromUrl(url))) {
+      try {
+        const chatId = ping?.chatId || parseChatIdFromUrl(url);
+        const titleResults = await chrome.scripting.executeScript({
+          target: { tabId: t.id },
+          func: (cid) => {
+            const link = document.querySelector(`a[href*="/app/${cid}"]`);
+            if (!link) return null;
+            const clone = link.cloneNode(true);
+            for (let i = clone.children.length - 1; i >= 0; i--) clone.children[i].remove();
+            const text = (clone.textContent || '').trim();
+            return text.length >= 2 ? text : null;
+          },
+          args: [chatId]
+        });
+        title = titleResults?.[0]?.result || null;
+      } catch { /* ignore */ }
+    }
     pages.push({
       tab_id: t.id,
       url,
       site,
       chat_id: ping?.chatId || parseChatIdFromUrl(url) || null,
-      title: ping?.title || t.title || null,
+      title: title || t.title || null,
       user_profile: ping?.userProfile || parseUserProfileFromUrl(url) || 'default',
       monitoring: ping?.monitoring || false
     });
