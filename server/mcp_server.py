@@ -887,6 +887,18 @@ async def handle_websocket_message(websocket: WebSocket, session_id: str, msg: d
                 "type": "pages_sync_ok",
                 "payload": {"count": len(pages)}
             }))
+            # Broadcast updated pages to all connected clients (admin-web, etc.)
+            all_pages = page_registry.get_all()
+            await manager.broadcast({
+                "type": "pages_update",
+                "payload": {
+                    "pages": all_pages,
+                    "meta": {
+                        "total": len(all_pages),
+                        "connected_extensions": len(manager.active_connections),
+                    }
+                }
+            })
 
     else:
         await websocket.send_text(json.dumps({
