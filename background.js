@@ -552,14 +552,18 @@ class GAPIWebSocketClient {
       return;
     }
 
-    // GET_LAST_RESPONSE / inspect*: always use direct execution (chrome.scripting)
+    // GET_LAST_RESPONSE / inspect* / customQuery / expandToolCalls: always use direct execution (chrome.scripting)
     // SEND_MESSAGE: use content script handler (more reliable for framework state)
-    if (action === 'GET_LAST_RESPONSE' || action === 'inspectDOM' || action === 'inspectMessages') {
+    const directActions = [
+      'GET_LAST_RESPONSE', 'inspectDOM', 'inspectMessages', 'inspectReply',
+      'inspectToolCalls', 'expandToolCalls', 'customQuery'
+    ];
+    if (directActions.includes(action)) {
       try {
-        const result = await this.executeDirectCommand(tab_id, action, message);
+        const result = await this.executeDirectCommand(tab_id, action, message, payload);
         sendResult({ success: true, data: result });
       } catch (directErr) {
-        console.error('[GAPI-WS] Direct GET_LAST_RESPONSE failed:', directErr);
+        console.error(`[GAPI-WS] Direct ${action} failed:`, directErr);
         sendResult({ success: false, error: directErr.message });
       }
       return;
@@ -594,7 +598,7 @@ class GAPIWebSocketClient {
   }
 
   // Direct execution fallback — bypasses content script listeners entirely
-  async executeDirectCommand(tabId, action, message) {
+  async executeDirectCommand(tabId, action, message, payload = {}) {
     if (action === 'GET_LAST_RESPONSE') {
       const results = await chrome.scripting.executeScript({
         target: { tabId },
@@ -924,6 +928,309 @@ class GAPIWebSocketClient {
         }
       });
       return results[0]?.result || { status: 'failed' };
+    }
+
+    // inspectToolCalls: deep inspect tool call summaries, file references, and collapsed sections
+    if (action === 'inspectToolCalls') {
+      const msgIdx = payload.message_index;
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (targetIndex) => {
+          const blocks = document.querySelectorAll('.user-message-block');
+          if (blocks.length === 0) return { error: 'No message blocks found' };
+
+          const inspectBlock = (block, idx) => {
+            const reply = block.children[1];
+            if (!reply) return { index: idx, error: 'No reply child' };
+
+            // Find tool call summary lines — they match "Nebula exchanged N messages and executed N tools"
+            // or "Nebula executed N tools"
+            const toolCallPattern = /(?:exchanged\s+\d+\s+messages?\s+and\s+)?executed\s+\d+\s+tools?/i;
+            const allText = reply.innerText || '';
+            const hasToolCalls = toolCallPattern.test(allText);
+
+            // Find clickable/expandable tool call summary elements
+            const toolCallSummaries = [];
+            // Nebula wraps tool summaries in clickable divs. Look for elements containing the pattern.
+            reply.querySelectorAll('div, span, button, p').forEach(el => {
+              const txt = (el.textContent || '').trim();
+              if (toolCallPattern.test(txt) && txt.length < 200) {
+                toolCallSummaries.push({
+                  tag: el.tagName,
+                  classes: (el.className || '').substring(0, 200),
+                  text: txt.substring(0, 200),
+                  clickable: el.tagName === 'BUTTON' || el.onclick !== null || el.getAttribute('role') === 'button' || el.style.cursor === 'pointer',
+                  parentClasses: (el.parentElement?.className || '').substring(0, 200),
+                  attrs: Array.from(el.attributes || []).map(a => `${a.name}=${a.value.substring(0, 100)}`).slice(0, 10),
+                  childHTML: el.innerHTML.substring(0, 500)
+                });
+              }
+            });
+
+            // Find file reference elements — look for file paths like /filename.md
+            const fileRefs = [];
+            reply.querySelectorAll('a, div, span, p').forEach(el => {
+              const txt = (el.textContent || '').trim();
+              // Match file paths: /something.md, docs/something.md, etc.
+              if (/[\w/]+\.\w{1,5}$/.test(txt) && txt.length < 300) {
+                fileRefs.push({
+                  tag: el.tagName,
+                  classes: (el.className || '').substring(0, 200),
+                  text: txt.substring(0, 300),
+                  href: el.getAttribute('href') || null,
+                  dataAttrs: Array.from(el.attributes || [])
+                    .filter(a => a.name.startsWith('data-'))
+                    .map(a => `${a.name}=${a.value.substring(0, 100)}`),
+                  parentTag: el.parentElement?.tagName || null,
+                  parentClasses: (el.parentElement?.className || '').substring(0, 200)
+                });
+              }
+            });
+
+            // Find any link elements that might point to files
+            const fileLinks = [];
+            reply.querySelectorAll('a[href]').forEach(a => {
+              const href = a.getAttribute('href') || '';
+              if (href.includes('/files') || href.includes('/file/') || href.includes('.md')) {
+                fileLinks.push({
+                  text: (a.textContent || '').trim().substring(0, 200),
+                  href: href.substring(0, 500),
+                  classes: (a.className || '').substring(0, 200)
+                });
+              }
+            });
+
+            // Detect expanded sections (non-collapsed content that might contain file previews)
+            const expandedSections = [];
+            reply.querySelectorAll('[class*="expanded"], [class*="open"], [class*="show"], [aria-expanded="true"], details[open]').forEach(el => {
+              expandedSections.push({
+                tag: el.tagName,
+                classes: (el.className || '').substring(0, 200),
+                text: (el.innerText || '').substring(0, 500),
+                childCount: el.children.length
+              });
+            });
+
+            // Look for code blocks or pre elements that might contain file content
+            const codeBlocks = [];
+            reply.querySelectorAll('pre, code, [class*="code-block"], [class*="markdown"]').forEach(el => {
+              codeBlocks.push({
+                tag: el.tagName,
+                classes: (el.className || '').substring(0, 200),
+                text: (el.textContent || '').substring(0, 500),
+                length: (el.textContent || '').length
+              });
+            });
+
+            return {
+              index: idx,
+              blockId: block.id || null,
+              hasToolCalls,
+              toolCallSummaries,
+              fileRefs,
+              fileLinks,
+              expandedSections,
+              codeBlocks,
+              replyText: allText.substring(0, 1000),
+              replyChildCount: reply.children.length,
+              replyChildren: Array.from(reply.children).slice(0, 15).map((c, ci) => ({
+                index: ci,
+                tag: c.tagName,
+                classes: (c.className || '').substring(0, 150),
+                text: (c.innerText || '').substring(0, 200),
+                childCount: c.children.length
+              }))
+            };
+          };
+
+          if (typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < blocks.length) {
+            return { total: blocks.length, blocks: [inspectBlock(blocks[targetIndex], targetIndex)] };
+          }
+
+          // Inspect all blocks that have tool calls
+          const results = [];
+          blocks.forEach((block, i) => {
+            const info = inspectBlock(block, i);
+            if (info.hasToolCalls || info.fileRefs.length > 0 || info.fileLinks.length > 0) {
+              results.push(info);
+            }
+          });
+
+          return { total: blocks.length, url: location.href, blocks: results };
+        },
+        args: [msgIdx !== undefined ? msgIdx : null]
+      });
+      return results[0]?.result || { status: 'failed', reason: 'No result' };
+    }
+
+    // expandToolCalls: click on collapsed tool call summaries to expand them, then read
+    if (action === 'expandToolCalls') {
+      const msgIdx = payload.message_index;
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (targetIndex) => {
+          return new Promise((resolve) => {
+            const blocks = document.querySelectorAll('.user-message-block');
+            if (blocks.length === 0) { resolve({ error: 'No message blocks found' }); return; }
+
+            const blockIdx = (typeof targetIndex === 'number' && targetIndex >= 0) ? targetIndex : blocks.length - 1;
+            if (blockIdx >= blocks.length) { resolve({ error: `Block index ${blockIdx} out of range (total: ${blocks.length})` }); return; }
+
+            const block = blocks[blockIdx];
+            const reply = block.children[1];
+            if (!reply) { resolve({ error: 'No reply child in block' }); return; }
+
+            const toolCallPattern = /(?:exchanged\s+\d+\s+messages?\s+and\s+)?executed\s+\d+\s+tools?/i;
+
+            // Find clickable elements containing tool call text
+            const clickTargets = [];
+            reply.querySelectorAll('div, span, button, p').forEach(el => {
+              const txt = (el.textContent || '').trim();
+              if (toolCallPattern.test(txt) && txt.length < 200) {
+                clickTargets.push(el);
+              }
+            });
+
+            if (clickTargets.length === 0) {
+              // No tool call summaries — just return current content
+              resolve({
+                expanded: false,
+                reason: 'No tool call summaries found to expand',
+                content: reply.innerText.substring(0, 3000)
+              });
+              return;
+            }
+
+            // Click on each tool call summary element (use the smallest / most specific one)
+            const clicked = [];
+            clickTargets.forEach(el => {
+              // Find the most specific (innermost) clickable parent/self
+              let target = el;
+              // If the text-bearing element is inside a clickable container, click the container
+              let parent = el;
+              while (parent && parent !== reply) {
+                if (parent.getAttribute('role') === 'button' || parent.tagName === 'BUTTON' ||
+                    parent.classList.contains('cursor-pointer') || parent.style.cursor === 'pointer') {
+                  target = parent;
+                  break;
+                }
+                // Check computed style for cursor pointer
+                const computed = window.getComputedStyle(parent);
+                if (computed.cursor === 'pointer') {
+                  target = parent;
+                  break;
+                }
+                parent = parent.parentElement;
+              }
+              try {
+                target.click();
+                clicked.push({
+                  tag: target.tagName,
+                  classes: (target.className || '').substring(0, 200),
+                  text: (target.textContent || '').trim().substring(0, 200)
+                });
+              } catch (e) {
+                clicked.push({ error: e.message });
+              }
+            });
+
+            // Wait for DOM to update after click, then capture expanded content
+            setTimeout(() => {
+              // Re-read the reply content after expansion
+              const expandedContent = reply.innerText || '';
+
+              // Check for newly visible file content, code blocks, or details
+              const newCodeBlocks = [];
+              reply.querySelectorAll('pre, code, [class*="code-block"], [class*="markdown-body"]').forEach(el => {
+                newCodeBlocks.push({
+                  tag: el.tagName,
+                  classes: (el.className || '').substring(0, 200),
+                  text: (el.textContent || '').substring(0, 2000),
+                  fullLength: (el.textContent || '').length
+                });
+              });
+
+              // Check for file preview areas
+              const filePreviews = [];
+              reply.querySelectorAll('[class*="file"], [class*="preview"], [class*="editor"], [class*="document"]').forEach(el => {
+                filePreviews.push({
+                  tag: el.tagName,
+                  classes: (el.className || '').substring(0, 200),
+                  text: (el.textContent || '').substring(0, 2000),
+                  fullLength: (el.textContent || '').length
+                });
+              });
+
+              // Also look for newly appeared expanded areas
+              const expandedAreas = [];
+              reply.querySelectorAll('[aria-expanded="true"], details[open], [class*="expanded"]').forEach(el => {
+                expandedAreas.push({
+                  tag: el.tagName,
+                  classes: (el.className || '').substring(0, 200),
+                  text: (el.textContent || '').substring(0, 2000),
+                  fullLength: (el.textContent || '').length
+                });
+              });
+
+              // Capture full inner HTML structure for deep analysis
+              const replyHTML = reply.innerHTML.substring(0, 5000);
+
+              resolve({
+                expanded: true,
+                blockIndex: blockIdx,
+                clicked,
+                content: expandedContent.substring(0, 5000),
+                contentLength: expandedContent.length,
+                codeBlocks: newCodeBlocks,
+                filePreviews,
+                expandedAreas,
+                replyHTML
+              });
+            }, 2000); // 2s wait for expansion animation
+          });
+        },
+        args: [msgIdx !== undefined ? msgIdx : null]
+      });
+      return results[0]?.result || { status: 'failed', reason: 'No result' };
+    }
+
+    // customQuery: run an arbitrary CSS selector and return matching elements
+    if (action === 'customQuery') {
+      const selector = payload.selector;
+      if (!selector) {
+        return { error: 'No selector provided. Pass "selector" in the request body.' };
+      }
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (sel) => {
+          try {
+            const els = document.querySelectorAll(sel);
+            if (els.length === 0) return { selector: sel, count: 0, elements: [] };
+            const items = [];
+            els.forEach((el, i) => {
+              if (i >= 20) return; // cap at 20 results
+              items.push({
+                index: i,
+                tag: el.tagName,
+                id: el.id || null,
+                classes: (el.className || '').substring(0, 300),
+                text: (el.innerText || '').substring(0, 1000),
+                textLength: (el.innerText || '').length,
+                html: el.outerHTML.substring(0, 2000),
+                htmlLength: el.outerHTML.length,
+                attrs: Array.from(el.attributes || []).map(a => `${a.name}=${a.value.substring(0, 200)}`).slice(0, 15),
+                childCount: el.children.length,
+                rect: (() => { const r = el.getBoundingClientRect(); return { top: r.top, left: r.left, width: r.width, height: r.height }; })()
+              });
+            });
+            return { selector: sel, count: els.length, elements: items, url: location.href };
+          } catch (e) {
+            return { selector: sel, error: e.message };
+          }
+        },
+        args: [selector]
+      });
+      return results[0]?.result || { status: 'failed', reason: 'No result' };
     }
 
     throw new Error(`Unsupported direct action: ${action}`);

@@ -2,11 +2,13 @@
 // Selectors for nebula.gg AI agent chat platform.
 // Nebula uses Next.js (Turbopack) + React + Tailwind CSS + shadcn/ui.
 // Key patterns:
-//   - Messages: .message-appear, .highlight-message, .streaming-cursor
-//   - Input: <textarea> or <input type="text"> (plain text, Zustand messageDraft)
+//   - Messages: .user-message-block (id=user-block-evt_XXX), reply in children[1]
+//   - Input: <div contenteditable="true" role="textbox"> (not textarea)
 //   - Send: <button type="submit"> with ArrowRight SVG inside <form>
 //   - Sidebar: channel list with /chat/channel/ links
-//   - NO ProseMirror/Tiptap — plain text input only
+//   - Tool calls: collapsed summary "Nebula exchanged N messages and executed N tools"
+//   - File refs: file paths like "docs/filename.md" appear in reply text after tool execution
+//   - File content: NOT rendered in DOM — stored in Nebula's /files backend
 
 (function() {
   'use strict';
@@ -73,18 +75,18 @@
       '[data-role="assistant"]'
     ],
 
-    // Input selectors (plain text input — no contenteditable)
+    // Input selectors (Nebula uses contenteditable div with role="textbox")
     inputSelectors: [
-      // Primary: textarea (most likely for plain text messageDraft)
+      // Primary: contenteditable div with role textbox (confirmed via DOM inspection)
+      'div[contenteditable="true"][role="textbox"]',
+      // Contenteditable with data-placeholder
+      'div[contenteditable="true"][data-placeholder]',
+      // Generic contenteditable
+      'div[contenteditable="true"]',
+      // Fallback: textarea
       'textarea',
-      // Input type text with Nebula-style placeholder
-      'input[type="text"][placeholder]',
       // shadcn/ui Input pattern
-      '[data-slot="input"]',
-      // Form input fallback
-      'form input[type="text"]',
-      // Broadest fallback: any contenteditable (in case they change later)
-      'div[contenteditable="true"]'
+      '[data-slot="input"]'
     ],
 
     // Send button selectors (submit button with ArrowRight SVG in form)
@@ -187,6 +189,94 @@
       'Today',
       'Yesterday'
     ],
+
+    // ========== Tool Call & File Reference Selectors ==========
+
+    // Regex pattern to match Nebula tool call summary lines
+    toolCallSummaryPattern: /(?:exchanged\s+\d+\s+messages?\s+and\s+)?executed\s+\d+\s+tools?/i,
+
+    // File path pattern: matches paths like /filename.md, docs/filename.md
+    filePathPattern: /[\w/.-]+\.\w{1,5}$/,
+
+    // Selectors for tool call summary elements within reply divs
+    toolCallSelectors: [
+      // Tool call summary line (collapsed)
+      '[class*="tool-call"]',
+      '[class*="tool-summary"]',
+      '[class*="tool-execution"]',
+      // Generic collapsible sections
+      'details summary',
+      '[aria-expanded]',
+      '[class*="collapsible"]',
+      '[class*="expandable"]'
+    ],
+
+    // Selectors for file references in Nebula replies
+    fileReferenceSelectors: [
+      'a[href*="/files"]',
+      'a[href*="/file/"]',
+      'a[href$=".md"]',
+      '[class*="file-ref"]',
+      '[class*="file-link"]',
+      '[class*="file-card"]',
+      '[class*="file-preview"]'
+    ],
+
+    // Selectors for expanded content areas
+    expandedContentSelectors: [
+      '[aria-expanded="true"]',
+      'details[open]',
+      '[class*="expanded"]',
+      '[class*="code-block"]',
+      'pre code',
+      '[class*="markdown-body"]',
+      '[class*="markdown-content"]'
+    ],
+
+    /**
+     * Extract file references from a reply element.
+     * Returns an array of { path, name, type } objects.
+     */
+    extractFileRefs(replyEl) {
+      if (!replyEl) return [];
+      const refs = [];
+      const text = replyEl.innerText || '';
+      // Match lines that look like file paths
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (this.filePathPattern.test(trimmed) && trimmed.length < 200) {
+          refs.push({
+            path: trimmed,
+            name: trimmed.split('/').pop(),
+            type: trimmed.split('.').pop()
+          });
+        }
+      }
+      // Also check anchor elements
+      replyEl.querySelectorAll('a[href]').forEach(a => {
+        const href = a.getAttribute('href') || '';
+        if (href.includes('/files') || href.includes('.md') || href.includes('/file/')) {
+          refs.push({
+            path: href,
+            name: (a.textContent || '').trim() || href.split('/').pop(),
+            type: href.split('.').pop(),
+            href
+          });
+        }
+      });
+      return refs;
+    },
+
+    /**
+     * Check if a message block contains tool call summaries.
+     */
+    hasToolCalls(blockEl) {
+      if (!blockEl) return false;
+      const reply = blockEl.children[1];
+      if (!reply) return false;
+      return this.toolCallSummaryPattern.test(reply.innerText || '');
+    },
 
     // ========== 圖片提取 ==========
     generatedImageSelector: null,

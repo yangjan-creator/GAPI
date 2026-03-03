@@ -1158,10 +1158,25 @@ async def get_tab_response(tab_id: int, auth=Depends(verify_auth)):
 
 class InspectRequest(BaseModel):
     action: str = "inspectDOM"
+    selector: Optional[str] = None
+    message_index: Optional[int] = None
 
 @app.post("/v1/tabs/{tab_id}/inspect")
 async def inspect_tab_dom(tab_id: int, body: InspectRequest = None, auth=Depends(verify_auth)):
-    """Inspect DOM selectors on a browser tab for debugging."""
+    """Inspect DOM selectors on a browser tab for debugging.
+
+    Actions:
+      - inspectDOM: scan common selectors for messages, inputs, buttons
+      - inspectMessages: list all message blocks with structure
+      - inspectReply: inspect the last reply block children
+      - inspectToolCalls: deep-inspect tool call summaries and file refs (Nebula)
+      - expandToolCalls: click tool call summaries to expand, then read content
+      - customQuery: run an arbitrary CSS selector (pass via 'selector' param)
+
+    Optional params:
+      - selector: CSS selector string for customQuery action
+      - message_index: 0-based index of a specific message block to inspect
+    """
     inspect_action = body.action if body else "inspectDOM"
     ext_id = manager.find_extension_for_tab(tab_id)
     if not ext_id:
@@ -1173,13 +1188,19 @@ async def inspect_tab_dom(tab_id: int, body: InspectRequest = None, auth=Depends
 
     command_id = f"cmd_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
 
+    payload = {
+        "command_id": command_id,
+        "tab_id": tab_id,
+        "action": inspect_action
+    }
+    if body and body.selector:
+        payload["selector"] = body.selector
+    if body and body.message_index is not None:
+        payload["message_index"] = body.message_index
+
     sent = await manager.send_to_extension(ext_id, {
         "type": "tab_command",
-        "payload": {
-            "command_id": command_id,
-            "tab_id": tab_id,
-            "action": inspect_action
-        }
+        "payload": payload
     })
 
     if not sent:
@@ -1190,7 +1211,7 @@ async def inspect_tab_dom(tab_id: int, body: InspectRequest = None, auth=Depends
     pending_tab_commands[command_id] = future
 
     try:
-        result = await asyncio.wait_for(future, timeout=10)
+        result = await asyncio.wait_for(future, timeout=15)
         return {"command_id": command_id, "status": "ok", "result": result}
     except asyncio.TimeoutError:
         pending_tab_commands.pop(command_id, None)
