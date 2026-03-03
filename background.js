@@ -557,7 +557,7 @@ class GAPIWebSocketClient {
     const directActions = [
       'GET_LAST_RESPONSE', 'EXTRACT_IMAGES', 'inspectDOM', 'inspectMessages', 'inspectReply',
       'inspectToolCalls', 'expandToolCalls', 'customQuery',
-      'NEBULA_LIST_FILES', 'NEBULA_GET_FILE'
+      'NEBULA_LIST_FILES', 'NEBULA_GET_FILE', 'NAVIGATE_TAB'
     ];
     if (directActions.includes(action)) {
       try {
@@ -1535,6 +1535,20 @@ class GAPIWebSocketClient {
         return { status: 'success', file_id: fileId, content };
       } catch (fetchErr) {
         return { status: 'failed', reason: `Nebula API fetch error: ${fetchErr.message}` };
+      }
+    }
+
+    // NAVIGATE_TAB: navigate an existing tab to a new URL
+    if (action === 'NAVIGATE_TAB') {
+      const url = payload.url;
+      if (!url) {
+        return { status: 'failed', reason: 'No url provided in payload' };
+      }
+      try {
+        const tab = await chrome.tabs.update(tabId, { url });
+        return { status: 'success', tab_id: tab.id, url };
+      } catch (navErr) {
+        return { status: 'failed', reason: `Tab navigation failed: ${navErr.message}` };
       }
     }
 

@@ -1251,6 +1251,52 @@ async def get_tab_info(tab_id: int, auth=Depends(verify_auth)):
         raise HTTPException(status_code=504, detail="Extension did not respond in time")
 
 
+class NavigateRequest(BaseModel):
+    url: str
+
+
+@app.post("/v1/tabs/{tab_id}/navigate")
+async def navigate_tab(tab_id: int, body: NavigateRequest, auth=Depends(verify_auth)):
+    """Navigate a browser tab to a specified URL.
+
+    Sends a NAVIGATE_TAB command to the extension, which uses
+    chrome.tabs.update to navigate the tab.
+    """
+    ext_id = manager.find_extension_for_tab(tab_id)
+    if not ext_id:
+        # Fallback: try any connected extension
+        if manager.extension_to_session:
+            ext_id = next(iter(manager.extension_to_session))
+        else:
+            raise HTTPException(status_code=404, detail="No extension connected")
+
+    command_id = f"cmd_{int(time.time() * 1000)}_{secrets.token_hex(4)}"
+
+    sent = await manager.send_to_extension(ext_id, {
+        "type": "tab_command",
+        "payload": {
+            "command_id": command_id,
+            "tab_id": tab_id,
+            "action": "NAVIGATE_TAB",
+            "url": body.url
+        }
+    })
+
+    if not sent:
+        raise HTTPException(status_code=502, detail="Extension WebSocket not available")
+
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    pending_tab_commands[command_id] = future
+
+    try:
+        result = await asyncio.wait_for(future, timeout=10)
+        return {"command_id": command_id, "status": "ok", "result": result}
+    except asyncio.TimeoutError:
+        pending_tab_commands.pop(command_id, None)
+        raise HTTPException(status_code=504, detail="Extension did not respond in time")
+
+
 class TabCreateRequest(BaseModel):
     url: str = "https://gemini.google.com/app"
     wait_ready: bool = True  # wait for tab to register in active pages
